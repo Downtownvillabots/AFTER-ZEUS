@@ -207,6 +207,23 @@ async def get_stats(bot, message):
             db2_size += stats['storageSize'] + stats['indexSize']
             
         free2 = DB_SIZE - db2_size
+
+        file3 = await Media3.count_documents()
+        
+        # Calculate size for Current thrid DB
+        db3stats = await db3_stats.command("dbStats")
+        current_db3_size = db3stats['storageSize'] + db3stats['indexSize']
+
+        #Calculate total size for Secondary DB Cluster
+        dbs3 = await client3.list_database_names()
+        db3_size = 0
+        for db_name in dbs3:
+            if db_name in ["admin", "local"]:
+                continue
+            stats = await client3[db_name].command("dbStats")
+            db3_size += stats['storageSize'] + stats['indexSize']
+
+        free3 = DB_SIZE - db3_size
         
         await msg.edit(script.MULTI_STATUS_TXT.format(
             total_users, totl_chats, premium,
