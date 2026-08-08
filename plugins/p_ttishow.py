@@ -8,7 +8,7 @@ from pyrogram.errors.exceptions.bad_request_400 import MessageTooLong, PeerIdInv
 from pyrogram.errors import ChatAdminRequired
 from info import ADMINS, MULTIPLE_DB, LOG_CHANNEL, OWNER_LNK, MELCOW_PHOTO
 from database.users_chats_db import db
-from database.ia_filterdb import Media, Media2, db as db_stats, db2 as db2_stats, client, client2
+from database.ia_filterdb import Media, Media2, Media3, db as db_stats, db2 as db2_stats, client, client2
 from utils import get_size, temp, get_settings, get_readable_time
 from Script import script
 from bot import botStartTime
