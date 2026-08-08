@@ -10,7 +10,7 @@ from umongo import Instance, Document, fields
 from motor.motor_asyncio import AsyncIOMotorClient
 from utils import get_settings, save_group_settings
 from info import (
-    COLLECTION_NAME, COVERX, DATABASE_NAME, DATABASE_URI, DATABASE_URI2,
+    COLLECTION_NAME, COVERX, DATABASE_NAME, DATABASE_URI, DATABASE_URI2, DATABASE_URI3,
     INDEX_CAPTION, MAX_B_TN, MULTIPLE_DB, ULTRA_FAST_MODE, USE_CAPTION_FILTER,
 )
 from datetime import datetime, timedelta
@@ -44,6 +44,16 @@ else:
     db2 = db
     instance2 = instance
 
+# tertiary db
+if MULTIPLE_DB and DATABASE_URI3:
+    client3 = AsyncIOMotorClient(DATABASE_URI3)
+    db3 = client3[DATABASE_NAME]
+    instance3 = Instance.from_db(db3)
+else:
+    client3 = client2
+    db3 = db2
+    instance3 = instance2
+
 
 @instance.register
 class Media(Document):
@@ -72,6 +82,21 @@ class Media2(Document):
     caption = fields.StrField(allow_none=True)
     cover = fields.StrField(allow_none=True)
 
+
+    class Meta:
+        indexes = ("$file_name",)
+        collection_name = COLLECTION_NAME
+
+@instance3.register
+class Media3(Document):
+    file_id = fields.StrField(attribute="_id")
+    file_ref = fields.StrField(allow_none=True)
+    file_name = fields.StrField(required=True)
+    file_size = fields.IntField(required=True)
+    file_type = fields.StrField(allow_none=True)
+    mime_type = fields.StrField(allow_none=True)
+    caption = fields.StrField(allow_none=True)
+    cover = fields.StrField(allow_none=True)
 
     class Meta:
         indexes = ("$file_name",)
@@ -116,11 +141,29 @@ async def save_file(media):
             if exists:
                 logger.info(f"[SKIP] '{file_name}' already in Primary DB.")
                 return False, 0
+
+            exists = await Media2.find_one({"file_id": file_id})
+            if exists:
+                logger.info(f"[SKIP] '{file_name}' already in Secondary DB.")
+                return False, 0
+
+            exists = await Media3.find_one({"file_id": file_id})
+            if exists:
+                logger.info(f"[SKIP] '{file_name}' already in Tertiary DB.")
+                return False, 0
+                
             primary_db_size = await check_db_size(db)
             if primary_db_size >= 407:
                 saveMedia = Media2
                 target_db = "Secondary"
                 logger.warning("Switching to Secondary DB due to size threshold.")
+                
+                secondary_db_size = await check_db_size(db2)
+                if secondary_db_size >= 407:
+                    saveMedia = Media3
+                    target_db = "Tertiary"
+                    logger.warning("Switching to Tertiary DB due to size threshold.")
+                    
         except Exception as e:
             logger.error(
                 "Error during MULTIPLE_DB check; defaulting to primary DB.", exc_info=e
@@ -199,8 +242,9 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
             results = await asyncio.gather(
                 Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                 Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
             )
-            files = results[1] + results[0]
+            files = results[2] + results[1] + results[0]
             files = files[offset:offset + limit]
         else:
             files = await Media.find(filter_mongo).sort("$natural", -1).skip(offset).limit(limit).to_list(length=limit)
@@ -213,14 +257,16 @@ async def get_search_results(chat_id, query, file_type=None, max_results=None, o
         if MULTIPLE_DB:
             fetch_limit = offset + max_results
             count_results, find_results = await asyncio.gather(
-                asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo)),
+                asyncio.gather(Media.count_documents(filter_mongo), Media2.count_documents(filter_mongo), Media3.count_documents(filter_mongo)),
                 asyncio.gather(
                     Media.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
                     Media2.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    Media3.find(filter_mongo).sort("$natural", -1).limit(fetch_limit).to_list(length=fetch_limit),
+                    
                 )
             )
             total_results = sum(count_results)
-            files = find_results[1] + find_results[0]
+            files = find_results[2] + find_results[1] + find_results[0]
             files = files[offset:offset + max_results]
         else:
             total_results = await Media.count_documents(filter_mongo)
@@ -267,9 +313,15 @@ async def get_bad_files(query, file_type=None):
             .sort("$natural", -1)
             .to_list(300)
         )
+        tasks.append(
+            Media3.find(filter_mongo)
+            .sort("$natural", -1)
+            .to_list(300)
+        )
+        
     results = await asyncio.gather(*tasks)
     if MULTIPLE_DB and len(results) > 1:
-        files = results[1] + results[0]
+        files = results[2] + results[1] + results[0]
     else:
         files = results[0]
     files = files[:300]
@@ -279,7 +331,8 @@ async def get_file_details(query):
     filter = {"file_id": query}
     tasks = [Media.find(filter).to_list(length=1)]
     if MULTIPLE_DB:
-        tasks.append(Media2.find(filter).to_list(length=1))  
+        tasks.append(Media2.find(filter).to_list(length=1))
+        tasks.append(Media3.find(filter).to_list(length=1))  
     results = await asyncio.gather(*tasks)
     for filedetails in results:
         if filedetails:
@@ -326,6 +379,13 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
         if MULTIPLE_DB:
             db_size = await check_db_size(db)
             if db_size > 407:
+                db2_size = await check_db_size(db2)
+                if db2_size > 407:
+                     db3_size = await check_db_size(db3)
+                    if db3_size > 407:
+                    cursor = Media3.find().sort("$natural", -1).limit(limit)
+                    files = await cursor.to_list(length=limit)
+                    return files
                 cursor = Media2.find().sort("$natural", -1).limit(limit)
                 files = await cursor.to_list(length=limit)
                 return files
