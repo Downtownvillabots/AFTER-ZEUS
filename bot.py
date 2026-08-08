@@ -10,7 +10,7 @@ from datetime import date, datetime
 from pathlib import Path
 import pytz
 from aiohttp import web
-from database.ia_filterdb import Media, Media2
+from database.ia_filterdb import Media, Media2, Media3
 from database.users_chats_db import db
 from info import MULTIPLE_DB, ON_HEROKU, LOG_STR, LOG_CHANNEL, PORT
 from utils import temp
