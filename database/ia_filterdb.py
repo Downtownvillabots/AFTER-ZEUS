@@ -378,20 +378,26 @@ async def dreamxbotz_fetch_media(limit: int) -> List[dict]:
     try:
         if MULTIPLE_DB:
             db_size = await check_db_size(db)
+            
             if db_size > 407:
                 db2_size = await check_db_size(db2)
+                
                 if db2_size > 407:
                      db3_size = await check_db_size(db3)
-                    if db3_size > 407:
+                    
+                if db3_size > 407:
                     cursor = Media3.find().sort("$natural", -1).limit(limit)
                     files = await cursor.to_list(length=limit)
                     return files
+                    
                 cursor = Media2.find().sort("$natural", -1).limit(limit)
                 files = await cursor.to_list(length=limit)
                 return files
+                
         cursor = Media.find().sort("$natural", -1).limit(limit)
         files = await cursor.to_list(length=limit)
         return files
+        
     except Exception as e:
         logger.error(f"Error in dreamxbotz_fetch_media: {e}")
         return []
