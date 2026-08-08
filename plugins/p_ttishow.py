@@ -209,10 +209,12 @@ async def get_stats(bot, message):
         free2 = DB_SIZE - db2_size
         
         await msg.edit(script.MULTI_STATUS_TXT.format(
-            total_users, totl_chats, premium, file1, get_size(current_db_size), get_size(db_size), get_size(free),
+            total_users, totl_chats, premium,
+            file1, get_size(current_db_size), get_size(db_size), get_size(free),
             file2, get_size(current_db2_size), get_size(db2_size), get_size(free2), 
-            uptime, ram, cpu, (int(file1) + int(file2))
-            ))
+            file3, get_size(current_db3_size), get_size(db3_size), get_size(free3), 
+            uptime, ram, cpu, (int(file1) + int(file2) + int(file3))
+         ))
     except Exception as e:
        logger.error("Error In stats: %s", e)        
 
