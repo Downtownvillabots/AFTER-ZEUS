@@ -387,6 +387,7 @@ def get_file_caption(file):
 
 
 async def backup_single_file(
+    bot,
     source_db,
     file,
 ):
@@ -454,7 +455,7 @@ async def backup_single_file(
 
             try:
 
-                sent = await client.send_cached_media(
+                sent = await bot.send_cached_media(
                     chat_id=channel_id,
                     file_id=file_id,
                     caption=caption,
@@ -561,7 +562,7 @@ async def backup_single_file(
 # ============================================================
 
 
-async def backup_worker():
+async def backup_worker(bot):
     global backup_running
     global backup_started_at
     global backup_finished_at
@@ -650,6 +651,7 @@ async def backup_worker():
                 for source_db, file in files:
 
                     await backup_single_file(
+                        bot,
                         source_db,
                         file,
                     )
