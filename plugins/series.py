@@ -1,61 +1,69 @@
+```python
+# ============================================================
+# DOWNTOWNVILLA ULTIMATE SERIES SYSTEM
+# ============================================================
+#
+# FEATURES
+# ------------------------------------------------------------
+# 1. Series-group-only searching
+# 2. IMDb/Cinemagoer spelling correction / suggestions
+# 3. Movies are removed from series suggestions
+# 4. IMDb details + rating + genres + plot + poster
+# 5. "OPEN SERIES" button sends user to bot PM
+# 6. /start series_<IMDb_ID> opens series selection in PM
+# 7. Language selection
+#       eng / mal / hin / tam / tel / kan
+# 8. Season selection
+#       S01 / S02 / S03 ...
+# 9. Quality selection
+#       4K / 1440p / 1080p / 720p / 576p / 480p / 360p
+# 10. GET FILES button
+# 11. MongoDB is searched ONLY after GET FILES
+# 12. Searches Media + Media2 + Media3
+# 13. Strict title + language + season + quality matching
+# 14. Episode extraction:
+#       E01 / E02 / E03 / E04...
+# 15. One best file per episode
+# 16. Sends actual Telegram cached files
+# 17. NO STREAM BUTTON
+# 18. NO STREAM FUNCTION
+# 19. No movie/random files in series result
+# 20. IMDb search/detail caching
+# 21. Per-user state is RAM only
+#
+# ============================================================
+
 import os
 import re
 import asyncio
 import logging
-from collections import defaultdict
+from collections import OrderedDict
 from difflib import SequenceMatcher
 from html import escape
+from urllib.parse import quote
 
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters, enums, StopPropagation
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.errors import (
+    FloodWait,
+    RPCError,
+)
 
 from database.ia_filterdb import (
-    db,
-    db2,
-    db3,
+    Media,
+    Media2,
+    Media3,
+    MULTIPLE_DB,
 )
 
 from info import (
     COLLECTION_NAME,
-    MULTIPLE_DB,
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# DOWNTOWNVILLA SERIES SYSTEM
-# ============================================================
-#
-# FLOW:
-#
-# USER SEARCH
-#       ↓
-# IMDb suggestion
-#       ↓
-# SERIES DETAILS
-#       ↓
-# LANGUAGE
-#       ↓
-# SEASON
-#       ↓
-# QUALITY
-#       ↓
-# GET FILES
-#       ↓
-# MongoDB targeted search
-#       ↓
-# E01 / E02 / E03...
-#
-# IMPORTANT:
-#
-# MongoDB is NOT scanned during normal search.
-#
-# ============================================================
 
 
 # ============================================================
@@ -67,37 +75,35 @@ SERIES_GROUP_ID = os.getenv(
     "",
 ).strip()
 
-
 MOVIE_GROUP_LINK = os.getenv(
     "MOVIE_GROUP_LINK",
     "",
 ).strip()
 
-
-SERIES_POSTER = os.getenv(
-    "SERIES_POSTER",
-    "true",
-).lower() in (
-    "true",
-    "1",
-    "yes",
-    "on",
+SERIES_POSTER = (
+    os.getenv(
+        "SERIES_POSTER",
+        "true",
+    ).lower()
+    in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
 )
-
 
 SERIES_CAPTION = os.getenv(
     "SERIES_CAPTION",
     "",
 )
 
-
 SERIES_SEND_DELAY = float(
     os.getenv(
         "SERIES_SEND_DELAY",
-        "0.5",
+        "0.15",
     )
 )
-
 
 SERIES_SEARCH_LIMIT = int(
     os.getenv(
@@ -106,7 +112,6 @@ SERIES_SEARCH_LIMIT = int(
     )
 )
 
-
 SERIES_MAX_EPISODES = int(
     os.getenv(
         "SERIES_MAX_EPISODES",
@@ -114,79 +119,12 @@ SERIES_MAX_EPISODES = int(
     )
 )
 
-
-# ============================================================
-# LANGUAGE TRIGGERS
-# ============================================================
-#
-# IMPORTANT:
-#
-# These are only search tokens.
-#
-# User sees:
-#
-# English
-# Malayalam
-# Hindi
-#
-# Internally:
-#
-# eng
-# mal
-# hin
-#
-# ============================================================
-
-LANGUAGES = {
-    "eng": {
-        "name": "🇬🇧 English",
-        "triggers": [
-            "eng",
-            "english",
-            "en",
-        ],
-    },
-
-    "mal": {
-        "name": "🇮🇳 Malayalam",
-        "triggers": [
-            "mal",
-            "malayalam",
-        ],
-    },
-
-    "hin": {
-        "name": "🇮🇳 Hindi",
-        "triggers": [
-            "hin",
-            "hindi",
-        ],
-    },
-
-    "tam": {
-        "name": "🇮🇳 Tamil",
-        "triggers": [
-            "tam",
-            "tamil",
-        ],
-    },
-
-    "tel": {
-        "name": "🇮🇳 Telugu",
-        "triggers": [
-            "tel",
-            "telugu",
-        ],
-    },
-
-    "kan": {
-        "name": "🇮🇳 Kannada",
-        "triggers": [
-            "kan",
-            "kannada",
-        ],
-    },
-}
+SERIES_MAX_SEASON = int(
+    os.getenv(
+        "SERIES_MAX_SEASON",
+        "30",
+    )
+)
 
 
 # ============================================================
@@ -194,19 +132,15 @@ LANGUAGES = {
 # ============================================================
 
 try:
-
     SERIES_CHAT_ID = (
         int(SERIES_GROUP_ID)
         if SERIES_GROUP_ID
         else None
     )
-
 except Exception:
-
     SERIES_CHAT_ID = None
-
     logger.error(
-        "[SERIES] Invalid SERIES_GROUP_ID"
+        "[SERIES] Invalid SERIES_GROUP_ID."
     )
 
 
@@ -215,7 +149,6 @@ except Exception:
 # ============================================================
 
 try:
-
     import imdb
 
     imdb_api = imdb.IMDb()
@@ -227,9 +160,7 @@ try:
     )
 
 except Exception as e:
-
     imdb_api = None
-
     IMDB_AVAILABLE = False
 
     logger.warning(
@@ -239,84 +170,165 @@ except Exception as e:
 
 
 # ============================================================
-# MEMORY
+# MEMORY CACHE
 # ============================================================
 
-# IMDb title search cache.
+# Small LRU-style caches.
 #
-# This prevents repeated searches for:
-#
-# got
-# GOT
-# game of thrones
-#
-IMDB_SEARCH_CACHE = {}
+# We don't want unlimited memory usage.
+
+MAX_IMDB_SEARCH_CACHE = 2000
+MAX_IMDB_DETAILS_CACHE = 2000
+MAX_USER_STATE = 10000
 
 
-# IMDb detail cache.
-IMDB_DETAILS_CACHE = {}
+IMDB_SEARCH_CACHE = OrderedDict()
+IMDB_DETAILS_CACHE = OrderedDict()
 
-
-# Per-user temporary series state.
-#
-# This is NOT MongoDB.
-#
-# Example:
-#
-# {
-#     user_id: {
-#         "title": "Game of Thrones",
-#         "imdb_id": "0944947",
-#         "language": "eng",
-#         "season": 1,
-#         "quality": 1080
-#     }
-# }
-#
 USER_SERIES_STATE = {}
 
 
 # ============================================================
-# STATE LIMIT
+# CACHE HELPERS
 # ============================================================
 
-MAX_STATE_USERS = 10000
+def cache_get(
+    cache,
+    key,
+):
+    try:
+        value = cache.pop(key)
+        cache[key] = value
+        return value
+    except KeyError:
+        return None
 
 
-def cleanup_state():
+def cache_put(
+    cache,
+    key,
+    value,
+    maximum,
+):
+    if key in cache:
+        cache.pop(key, None)
 
-    if len(USER_SERIES_STATE) <= MAX_STATE_USERS:
+    cache[key] = value
+
+    while len(cache) > maximum:
+        cache.popitem(
+            last=False
+        )
+
+
+def cleanup_user_state():
+
+    if len(USER_SERIES_STATE) <= MAX_USER_STATE:
         return
 
-    # Remove oldest approximately.
-    #
-    # This is intentionally simple and cheap.
-    #
     remove_count = (
         len(USER_SERIES_STATE)
-        - MAX_STATE_USERS
+        - MAX_USER_STATE
     )
 
-    for key in list(
+    for user_id in list(
         USER_SERIES_STATE.keys()
     )[:remove_count]:
 
         USER_SERIES_STATE.pop(
-            key,
+            user_id,
             None,
         )
 
 
 # ============================================================
-# BASIC HELPERS
+# LANGUAGE SYSTEM
+# ============================================================
+#
+# User sees the normal language.
+#
+# Database matching uses compact trigger tokens.
+#
+# English  -> eng
+# Malayalam -> mal
+# Hindi -> hin
+# Tamil -> tam
+# Telugu -> tel
+# Kannada -> kan
+#
 # ============================================================
 
-def normalize_title(text):
+LANGUAGES = {
+
+    "eng": {
+        "name": "🇬🇧 English",
+        "short": "ENG",
+        "triggers": [
+            "eng",
+            "english",
+            "en",
+        ],
+    },
+
+    "mal": {
+        "name": "🇮🇳 Malayalam",
+        "short": "MAL",
+        "triggers": [
+            "mal",
+            "malayalam",
+        ],
+    },
+
+    "hin": {
+        "name": "🇮🇳 Hindi",
+        "short": "HIN",
+        "triggers": [
+            "hin",
+            "hindi",
+        ],
+    },
+
+    "tam": {
+        "name": "🇮🇳 Tamil",
+        "short": "TAM",
+        "triggers": [
+            "tam",
+            "tamil",
+        ],
+    },
+
+    "tel": {
+        "name": "🇮🇳 Telugu",
+        "short": "TEL",
+        "triggers": [
+            "tel",
+            "telugu",
+        ],
+    },
+
+    "kan": {
+        "name": "🇮🇳 Kannada",
+        "short": "KAN",
+        "triggers": [
+            "kan",
+            "kannada",
+        ],
+    },
+}
+
+
+# ============================================================
+# NORMALIZATION
+# ============================================================
+
+def normalize_text(text):
 
     if not text:
         return ""
 
     text = str(text)
+
+    text = text.lower()
 
     text = text.replace(
         "_",
@@ -345,13 +357,27 @@ def normalize_title(text):
         text,
     )
 
-    return text.strip().lower()
+    return text.strip()
 
 
-def similarity(a, b):
+def title_words(text):
 
-    a = normalize_title(a)
-    b = normalize_title(b)
+    return [
+        word
+        for word in normalize_text(
+            text
+        ).split()
+        if len(word) >= 2
+    ]
+
+
+def similarity(
+    a,
+    b,
+):
+
+    a = normalize_text(a)
+    b = normalize_text(b)
 
     if not a or not b:
         return 0
@@ -366,7 +392,7 @@ def similarity(a, b):
     )
 
 
-def escape_html(value):
+def html_escape(value):
 
     if value is None:
         return ""
@@ -374,89 +400,6 @@ def escape_html(value):
     return escape(
         str(value)
     )
-
-
-def parse_int(
-    value,
-    default=0,
-):
-
-    try:
-
-        return int(value)
-
-    except Exception:
-
-        return default
-
-
-# ============================================================
-# SEASON / EPISODE
-# ============================================================
-
-def extract_season_episode(
-    filename,
-):
-
-    if not filename:
-        return None, None
-
-    name = str(
-        filename
-    )
-
-    # --------------------------------------------------------
-    # S01E01
-    # S1E1
-    # S01.E01
-    # S01-E01
-    # S01_E01
-    # --------------------------------------------------------
-
-    match = re.search(
-        r"(?i)\bS(\d{1,2})"
-        r"[\s._\-]*"
-        r"E(\d{1,3})\b",
-        name,
-    )
-
-    if match:
-
-        return (
-            int(
-                match.group(1)
-            ),
-            int(
-                match.group(2)
-            ),
-        )
-
-    # --------------------------------------------------------
-    # Season 01 Episode 01
-    # --------------------------------------------------------
-
-    match = re.search(
-        r"(?i)\bSeason"
-        r"[\s._\-]*(\d{1,2})"
-        r"[\s._\-]*"
-        r"(?:Episode|Ep|E)"
-        r"[\s._\-]*"
-        r"(\d{1,3})\b",
-        name,
-    )
-
-    if match:
-
-        return (
-            int(
-                match.group(1)
-            ),
-            int(
-                match.group(2)
-            ),
-        )
-
-    return None, None
 
 
 # ============================================================
@@ -468,52 +411,65 @@ QUALITY_PATTERNS = [
     (
         2160,
         re.compile(
-            r"(?i)\b2160p\b|\b4k\b|\buhd\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"(?:2160p|4k|uhd)"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         1440,
         re.compile(
-            r"(?i)\b1440p\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"1440p"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         1080,
         re.compile(
-            r"(?i)\b1080p\b|\b1080i\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"(?:1080p|1080i)"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         720,
         re.compile(
-            r"(?i)\b720p\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"720p"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         576,
         re.compile(
-            r"(?i)\b576p\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"576p"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         480,
         re.compile(
-            r"(?i)\b480p\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"480p"
+            r"(?:$|[\s._+\-])"
         ),
     ),
 
     (
         360,
         re.compile(
-            r"(?i)\b360p\b"
+            r"(?i)(?:^|[\s._+\-])"
+            r"360p"
+            r"(?:$|[\s._+\-])"
         ),
     ),
-
 ]
 
 
@@ -533,7 +489,6 @@ def extract_quality(
         if pattern.search(
             filename
         ):
-
             return quality
 
     return 0
@@ -556,23 +511,7 @@ def quality_text(
 # LANGUAGE MATCHING
 # ============================================================
 
-def language_tokens(
-    language,
-):
-
-    data = LANGUAGES.get(
-        language
-    )
-
-    if not data:
-        return []
-
-    return data[
-        "triggers"
-    ]
-
-
-def filename_has_language(
+def language_matches(
     filename,
     language,
 ):
@@ -580,97 +519,265 @@ def filename_has_language(
     if not filename:
         return False
 
-    filename = normalize_title(
+    normalized = normalize_text(
         filename
     )
 
-    tokens = language_tokens(
+    words = set(
+        normalized.split()
+    )
+
+    data = LANGUAGES.get(
         language
     )
 
-    if not tokens:
-        return True
+    if not data:
+        return False
 
-    words = set(
-        filename.split()
-    )
+    for trigger in data[
+        "triggers"
+    ]:
 
-    for token in tokens:
+        trigger = normalize_text(
+            trigger
+        )
 
-        if normalize_title(
-            token
-        ) in words:
-
+        if trigger in words:
             return True
 
-    return False
+    # Extra protection for compact tags.
+    #
+    # Example:
+    # [ENG]
+    # -ENG
+    # .ENG
+    #
+
+    pattern = (
+        r"(?i)(?:^|[^a-z])"
+        + "|".join(
+            re.escape(
+                x
+            )
+            for x in data[
+                "triggers"
+            ]
+        )
+        + r"(?:$|[^a-z])"
+    )
+
+    return bool(
+        re.search(
+            pattern,
+            str(filename),
+        )
+    )
+
+
+# ============================================================
+# SEASON / EPISODE EXTRACTION
+# ============================================================
+
+def extract_season_episode(
+    filename,
+):
+
+    if not filename:
+        return None, None
+
+    filename = str(
+        filename
+    )
+
+    # --------------------------------------------------------
+    # S01E01
+    # S1E1
+    # S01.E01
+    # S01-E01
+    # S01_E01
+    # --------------------------------------------------------
+
+    match = re.search(
+        r"(?i)(?:^|[^a-z])"
+        r"S(\d{1,2})"
+        r"[\s._\-]*"
+        r"E(\d{1,3})"
+        r"(?:$|[^a-z])",
+        filename,
+    )
+
+    if match:
+
+        return (
+            int(
+                match.group(1)
+            ),
+            int(
+                match.group(2)
+            ),
+        )
+
+    # --------------------------------------------------------
+    # Season 01 Episode 01
+    # Season 1 Ep 1
+    # --------------------------------------------------------
+
+    match = re.search(
+        r"(?i)\bSeason"
+        r"[\s._\-]*(\d{1,2})"
+        r"[\s._\-]*"
+        r"(?:Episode|Ep|E)"
+        r"[\s._\-]*"
+        r"(\d{1,3})\b",
+        filename,
+    )
+
+    if match:
+
+        return (
+            int(
+                match.group(1)
+            ),
+            int(
+                match.group(2)
+            ),
+        )
+
+    return None, None
+
+
+def extract_season(
+    filename,
+):
+
+    if not filename:
+        return None
+
+    match = re.search(
+        r"(?i)\bS(\d{1,2})\b",
+        str(filename),
+    )
+
+    if match:
+        return int(
+            match.group(1)
+        )
+
+    match = re.search(
+        r"(?i)\bSeason"
+        r"[\s._\-]*(\d{1,2})\b",
+        str(filename),
+    )
+
+    if match:
+        return int(
+            match.group(1)
+        )
+
+    return None
 
 
 # ============================================================
 # TITLE MATCHING
 # ============================================================
 
-def filename_title_match(
+def clean_filename_for_title(
+    filename,
+):
+
+    text = normalize_text(
+        filename
+    )
+
+    # Remove S01E01.
+    text = re.sub(
+        r"\bs\d{1,2}\s*e\d{1,3}\b",
+        " ",
+        text,
+    )
+
+    # Remove Season 01 Episode 01.
+    text = re.sub(
+        r"\bseason\s*\d{1,2}\b",
+        " ",
+        text,
+    )
+
+    text = re.sub(
+        r"\b(?:episode|ep)\s*\d{1,3}\b",
+        " ",
+        text,
+    )
+
+    # Remove quality.
+    text = re.sub(
+        r"\b(?:2160p|1440p|1080p|1080i|720p|576p|480p|360p|4k|uhd)\b",
+        " ",
+        text,
+    )
+
+    # Remove common release tags.
+    text = re.sub(
+        r"\b(?:"
+        r"web[- ]?dl|"
+        r"webrip|"
+        r"web|"
+        r"bluray|"
+        r"brrip|"
+        r"hdrip|"
+        r"hdtv|"
+        r"dvdrip|"
+        r"x264|"
+        r"x265|"
+        r"h264|"
+        r"h265|"
+        r"hevc|"
+        r"10bit|"
+        r"8bit"
+        r")\b",
+        " ",
+        text,
+    )
+
+    return re.sub(
+        r"\s+",
+        " ",
+        text,
+    ).strip()
+
+
+def title_matches(
     title,
     filename,
 ):
 
-    title = normalize_title(
+    wanted = title_words(
         title
     )
 
-    filename = normalize_title(
+    if not wanted:
+        return False
+
+    cleaned = clean_filename_for_title(
         filename
     )
 
-    if not title or not filename:
-        return False
-
-    # Remove episode information.
-    filename = re.sub(
-        r"(?i)\bs\d{1,2}\s*e\d{1,3}\b",
-        " ",
-        filename,
+    available = set(
+        cleaned.split()
     )
-
-    filename = re.sub(
-        r"(?i)\bseason\s*\d{1,2}\b",
-        " ",
-        filename,
-    )
-
-    title_words = [
-        x
-        for x in title.split()
-        if len(x) >= 2
-    ]
-
-    filename_words = set(
-        filename.split()
-    )
-
-    if not title_words:
-        return False
 
     matched = 0
 
-    for word in title_words:
+    for word in wanted:
 
-        if word in filename_words:
-
+        if word in available:
             matched += 1
-
             continue
 
-        # Prefix match.
-        #
-        # Example:
-        #
-        # game
-        # games
-        #
+        # Allow small prefix variation.
+        found = False
 
-        for candidate in filename_words:
+        for candidate in available:
 
             if (
                 candidate.startswith(
@@ -680,72 +787,69 @@ def filename_title_match(
                     candidate
                 )
             ):
-
-                matched += 1
-
+                found = True
                 break
+
+        if found:
+            matched += 1
 
     score = (
         matched
-        / len(title_words)
+        / len(wanted)
     ) * 100
 
     return score >= 60
 
 
 # ============================================================
-# DATABASES
+# DATABASE LIST
 # ============================================================
 
-def get_databases():
+def get_series_databases():
 
     databases = [
         (
             "Media",
-            db,
+            Media,
         )
     ]
 
     if MULTIPLE_DB:
 
-        databases.append(
-            (
-                "Media2",
-                db2,
-            )
-        )
-
-        databases.append(
-            (
-                "Media3",
-                db3,
-            )
+        databases.extend(
+            [
+                (
+                    "Media2",
+                    Media2,
+                ),
+                (
+                    "Media3",
+                    Media3,
+                ),
+            ]
         )
 
     return databases
 
 
 # ============================================================
-# TARGETED MONGODB SEARCH
+# SERVER-SIDE CANDIDATE SEARCH
 # ============================================================
 #
-# THIS IS THE IMPORTANT PERFORMANCE PART.
+# IMPORTANT:
 #
-# We DO NOT do:
+# We don't use:
 #
 # collection.find({})
 #
-# We retrieve only documents that contain:
+# Instead we use the season token to reduce the MongoDB
+# candidate set first.
 #
-# S01E
-#
-# Then filter them in Python.
-#
-# Later you should create a MongoDB index on file_name.
+# Then strict filtering happens in Python.
 #
 # ============================================================
 
-async def search_series_files(
+async def search_series_candidates(
     title,
     language,
     season,
@@ -754,62 +858,69 @@ async def search_series_files(
 
     results = []
 
-    season_text = (
+    season_token = (
         f"S{season:02d}"
     )
 
     # --------------------------------------------------------
-    # Build regex.
+    # Candidate regex.
     #
-    # This avoids reading every document into Python.
+    # This catches:
+    #
+    # S01E01
+    # S01.E01
+    # S01-E01
+    # S01_E01
+    #
+    # MongoDB does the first filtering.
     # --------------------------------------------------------
 
     season_regex = re.compile(
-        rf"(?i){re.escape(season_text)}"
-        rf"[\s._\-]*E\d{{1,3}}\b"
+        rf"(?i)"
+        rf"(?:^|[^a-z])"
+        rf"S0?{season}"
+        rf"[\s._\-]*"
+        rf"E\d{{1,3}}"
+        rf"(?:$|[^a-z])"
     )
 
-    # --------------------------------------------------------
-    # Search databases one by one.
-    #
-    # Media first.
-    # Then Media2.
-    # Then Media3.
-    #
-    # --------------------------------------------------------
-
-    for db_name, database in get_databases():
+    for db_name, model in get_series_databases():
 
         try:
 
-            collection = database[
-                COLLECTION_NAME
-            ]
-
             # ------------------------------------------------
-            # MongoDB server-side filter.
+            # Main candidate query.
+            #
+            # We use the existing Document model.
             # ------------------------------------------------
 
-            cursor = collection.find(
+            cursor = model.find(
                 {
                     "file_name": {
                         "$regex":
                             season_regex
                     }
-                },
-                {
-                    "_id": 1,
-                    "file_name": 1,
-                    "file_size": 1,
-                    "file_type": 1,
-                    "mime_type": 1,
-                    "caption": 1,
-                    "file_ref": 1,
-                    "file_id": 1,
-                },
+                }
             )
 
+            # ------------------------------------------------
+            # IMPORTANT:
+            #
+            # Limit candidates so one bad database cannot
+            # explode RAM.
+            # ------------------------------------------------
+
+            candidate_count = 0
+
             async for document in cursor:
+
+                candidate_count += 1
+
+                if (
+                    candidate_count
+                    > 1500
+                ):
+                    break
 
                 filename = document.get(
                     "file_name"
@@ -818,9 +929,9 @@ async def search_series_files(
                 if not filename:
                     continue
 
-                # --------------------------------------------
-                # Season / episode
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Season + episode.
+                # ------------------------------------------------
 
                 file_season, episode = (
                     extract_season_episode(
@@ -835,36 +946,32 @@ async def search_series_files(
                 ):
                     continue
 
-                # --------------------------------------------
-                # Title
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Title.
+                # ------------------------------------------------
 
-                if not filename_title_match(
+                if not title_matches(
                     title,
                     filename,
                 ):
-
                     continue
 
-                # --------------------------------------------
-                # Language
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Language.
+                # ------------------------------------------------
 
-                if not filename_has_language(
+                if not language_matches(
                     filename,
                     language,
                 ):
-
                     continue
 
-                # --------------------------------------------
-                # Quality
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Quality.
+                # ------------------------------------------------
 
-                file_quality = (
-                    extract_quality(
-                        filename
-                    )
+                file_quality = extract_quality(
+                    filename
                 )
 
                 if (
@@ -872,27 +979,26 @@ async def search_series_files(
                     and file_quality
                     != quality
                 ):
-
                     continue
 
-                # --------------------------------------------
-                # Save
-                # --------------------------------------------
+                # ------------------------------------------------
+                # Save internal metadata.
+                # ------------------------------------------------
 
                 document[
-                    "_db"
+                    "_series_db"
                 ] = db_name
 
                 document[
-                    "_season"
-                ] = season
+                    "_series_season"
+                ] = file_season
 
                 document[
-                    "_episode"
+                    "_series_episode"
                 ] = episode
 
                 document[
-                    "_quality"
+                    "_series_quality"
                 ] = file_quality
 
                 results.append(
@@ -902,7 +1008,7 @@ async def search_series_files(
         except Exception as e:
 
             logger.exception(
-                "[SERIES] DB %s search failed: %s",
+                "[SERIES] %s search failed: %s",
                 db_name,
                 e,
             )
@@ -914,22 +1020,24 @@ async def search_series_files(
 # BEST FILE PER EPISODE
 # ============================================================
 
-def file_score(
+def episode_file_score(
     document,
 ):
 
-    quality = parse_int(
+    quality = int(
         document.get(
-            "_quality",
+            "_series_quality",
             0,
         )
+        or 0
     )
 
-    size = parse_int(
+    file_size = int(
         document.get(
             "file_size",
             0,
         )
+        or 0
     )
 
     filename = str(
@@ -939,14 +1047,15 @@ def file_score(
         )
     )
 
-    # Bigger file usually means better encode
-    # when resolution is identical.
+    # Quality is the primary score.
+    # Size is secondary.
     #
-    # This is only a secondary selection criterion.
+    # This means if the same episode exists in multiple DBs,
+    # we select the best matching quality.
 
     return (
         quality * 10_000_000_000
-        + size
+        + file_size
         + len(filename)
     )
 
@@ -960,7 +1069,7 @@ def choose_best_episode_files(
     for document in files:
 
         episode = document.get(
-            "_episode"
+            "_series_episode"
         )
 
         if episode is None:
@@ -978,10 +1087,14 @@ def choose_best_episode_files(
 
             continue
 
-        if file_score(
-            document
-        ) > file_score(
-            old
+        if (
+            episode_file_score(
+                document
+            )
+            >
+            episode_file_score(
+                old
+            )
         ):
 
             best[
@@ -1000,25 +1113,22 @@ def choose_best_episode_files(
 # ============================================================
 
 async def imdb_search(
-    text,
+    query,
 ):
 
     if not IMDB_AVAILABLE:
         return []
 
-    clean = normalize_title(
-        text
+    clean = normalize_text(
+        query
     )
 
     if not clean:
         return []
 
-    # --------------------------------------------------------
-    # Cache.
-    # --------------------------------------------------------
-
-    cached = IMDB_SEARCH_CACHE.get(
-        clean
+    cached = cache_get(
+        IMDB_SEARCH_CACHE,
+        clean,
     )
 
     if cached is not None:
@@ -1043,7 +1153,7 @@ async def imdb_search(
     output = []
 
     for item in results[
-        :SERIES_SEARCH_LIMIT
+        :SERIES_SEARCH_LIMIT * 3
     ]:
 
         title = item.get(
@@ -1056,42 +1166,50 @@ async def imdb_search(
         kind = str(
             item.get(
                 "kind",
-                ""
+                "",
             )
         ).lower()
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # We do not trust only kind.
-        #
-        # Some IMDb results can have incomplete metadata.
-        #
+        # Strict TV detection.
         # ----------------------------------------------------
 
-        is_tv = (
-            "tv" in kind
-            or kind in (
-                "series",
+        is_series = (
+            kind in (
                 "tv series",
                 "tv mini series",
-                "tv movie",
+                "tv mini-series",
+                "series",
+                "tv show",
+                "tv limited series",
+            )
+            or (
+                "tv" in kind
+                and "movie" not in kind
             )
         )
+
+        if not is_series:
+            continue
+
+        movie_id = getattr(
+            item,
+            "movieID",
+            None,
+        )
+
+        if not movie_id:
+            movie_id = item.get(
+                "movieID"
+            )
+
+        if not movie_id:
+            continue
 
         output.append(
             {
                 "id": str(
-                    item.movieID
-                    if getattr(
-                        item,
-                        "movieID",
-                        None,
-                    )
-                    else item.get(
-                        "movieID",
-                        ""
-                    )
+                    movie_id
                 ),
                 "title": str(
                     title
@@ -1100,66 +1218,26 @@ async def imdb_search(
                     "year"
                 ),
                 "kind": kind,
-                "is_tv": is_tv,
+                "score": similarity(
+                    query,
+                    title,
+                ),
             }
         )
 
-    IMDB_SEARCH_CACHE[
-        clean
-    ] = output
-
-    return output
-
-
-# ============================================================
-# SERIES CANDIDATES
-# ============================================================
-
-async def get_series_candidates(
-    query,
-):
-
-    results = await imdb_search(
+    # Exact title first.
+    normalized_query = normalize_text(
         query
     )
 
-    candidates = []
-
-    for result in results:
-
-        title = result[
-            "title"
-        ]
-
-        score = similarity(
-            query,
-            title,
-        )
-
-        # Exact match gets highest priority.
-
-        if normalize_title(
-            query
-        ) == normalize_title(
-            title
-        ):
-
-            score = 100
-
-        result[
-            "score"
-        ] = score
-
-        candidates.append(
-            result
-        )
-
-    candidates.sort(
+    output.sort(
         key=lambda x: (
-            x.get(
-                "is_tv",
-                False
-            ),
+            1
+            if normalize_text(
+                x["title"]
+            )
+            == normalized_query
+            else 0,
             x.get(
                 "score",
                 0,
@@ -1168,7 +1246,18 @@ async def get_series_candidates(
         reverse=True,
     )
 
-    return candidates
+    output = output[
+        :SERIES_SEARCH_LIMIT
+    ]
+
+    cache_put(
+        IMDB_SEARCH_CACHE,
+        clean,
+        output,
+        MAX_IMDB_SEARCH_CACHE,
+    )
+
+    return output
 
 
 # ============================================================
@@ -1182,10 +1271,9 @@ async def get_series_details(
     if not imdb_id:
         return {}
 
-    cached = (
-        IMDB_DETAILS_CACHE.get(
-            imdb_id
-        )
+    cached = cache_get(
+        IMDB_DETAILS_CACHE,
+        str(imdb_id),
     )
 
     if cached is not None:
@@ -1201,54 +1289,44 @@ async def get_series_details(
             str(imdb_id),
         )
 
-        title = movie.get(
-            "title",
-            "Unknown",
-        )
-
-        rating = movie.get(
-            "rating"
-        )
-
-        year = movie.get(
-            "year"
-        )
-
-        genres = movie.get(
-            "genres",
-            [],
-        )
-
-        plot = movie.get(
-            "plot",
-            [],
-        )
-
-        poster = movie.get(
-            "full-size cover url"
-        )
-
-        if not poster:
-
-            poster = movie.get(
-                "cover url"
-            )
-
         details = {
             "id": str(
                 imdb_id
             ),
-            "title": title,
-            "year": year,
-            "rating": rating,
-            "genres": genres,
-            "plot": plot,
-            "poster": poster,
+            "title": movie.get(
+                "title",
+                "Unknown",
+            ),
+            "year": movie.get(
+                "year"
+            ),
+            "rating": movie.get(
+                "rating"
+            ),
+            "genres": movie.get(
+                "genres",
+                [],
+            ),
+            "plot": movie.get(
+                "plot",
+                [],
+            ),
+            "poster": (
+                movie.get(
+                    "full-size cover url"
+                )
+                or movie.get(
+                    "cover url"
+                )
+            ),
         }
 
-        IMDB_DETAILS_CACHE[
-            imdb_id
-        ] = details
+        cache_put(
+            IMDB_DETAILS_CACHE,
+            str(imdb_id),
+            details,
+            MAX_IMDB_DETAILS_CACHE,
+        )
 
         return details
 
@@ -1263,15 +1341,64 @@ async def get_series_details(
 
 
 # ============================================================
+# BOT USERNAME / PM LINK
+# ============================================================
+
+async def get_bot_username(
+    app,
+):
+
+    try:
+
+        me = await app.get_me()
+
+        username = getattr(
+            me,
+            "username",
+            None,
+        )
+
+        if username:
+            return username
+
+    except Exception as e:
+
+        logger.warning(
+            "[SERIES] Unable to get bot username: %s",
+            e,
+        )
+
+    return None
+
+
+async def build_pm_link(
+    app,
+    imdb_id,
+):
+
+    username = await get_bot_username(
+        app
+    )
+
+    if not username:
+        return None
+
+    return (
+        f"https://t.me/"
+        f"{username}"
+        f"?start=series_{imdb_id}"
+    )
+
+
+# ============================================================
 # CALLBACK DATA
 # ============================================================
 
 def cb_title(
     imdb_id,
 ):
-
     return (
-        f"stv:{imdb_id}"
+        f"st:{imdb_id}"
     )
 
 
@@ -1279,9 +1406,8 @@ def cb_language(
     imdb_id,
     language,
 ):
-
     return (
-        f"slg:{imdb_id}:"
+        f"sl:{imdb_id}:"
         f"{language}"
     )
 
@@ -1291,9 +1417,8 @@ def cb_season(
     language,
     season,
 ):
-
     return (
-        f"ssn:{imdb_id}:"
+        f"ss:{imdb_id}:"
         f"{language}:"
         f"{season}"
     )
@@ -1305,9 +1430,8 @@ def cb_quality(
     season,
     quality,
 ):
-
     return (
-        f"sql:{imdb_id}:"
+        f"sq:{imdb_id}:"
         f"{language}:"
         f"{season}:"
         f"{quality}"
@@ -1320,9 +1444,8 @@ def cb_files(
     season,
     quality,
 ):
-
     return (
-        f"get:{imdb_id}:"
+        f"gf:{imdb_id}:"
         f"{language}:"
         f"{season}:"
         f"{quality}"
@@ -1330,7 +1453,7 @@ def cb_files(
 
 
 # ============================================================
-# SEARCH BUTTONS
+# SEARCH RESULT KEYBOARD
 # ============================================================
 
 def build_search_keyboard(
@@ -1355,7 +1478,6 @@ def build_search_keyboard(
         )
 
         if year:
-
             text += (
                 f" ({year})"
             )
@@ -1380,7 +1502,7 @@ def build_search_keyboard(
 
 
 # ============================================================
-# DETAILS TEXT
+# IMDb DETAILS TEXT
 # ============================================================
 
 def build_details_text(
@@ -1412,35 +1534,31 @@ def build_details_text(
 
     text = (
         "📺 <b>SERIES INFORMATION</b>\n\n"
-        f"🎬 <b>{escape_html(title)}</b>"
+        f"🎬 <b>{html_escape(title)}</b>"
     )
 
     if year:
-
         text += (
             f" ({year})"
         )
-
-    text += "\n\n"
 
     if rating:
 
         try:
 
             text += (
-                f"⭐ IMDb: "
-                f"<b>{float(rating):.1f}/10</b>\n"
+                "\n⭐ IMDb: "
+                f"<b>{float(rating):.1f}/10</b>"
             )
 
         except Exception:
-
             pass
 
     if genres:
 
         text += (
-            "🎭 Genres: "
-            f"<b>{escape_html(', '.join(genres[:5]))}</b>\n"
+            "\n🎭 Genres: "
+            f"<b>{html_escape(', '.join(genres[:5]))}</b>"
         )
 
     if plot:
@@ -1449,18 +1567,15 @@ def build_details_text(
             plot[0]
         )
 
-        if len(
-            plot_text
-        ) > 450:
-
+        if len(plot_text) > 500:
             plot_text = (
-                plot_text[:450]
+                plot_text[:500]
                 + "..."
             )
 
         text += (
-            "\n📝 "
-            f"{escape_html(plot_text)}"
+            "\n\n📝 "
+            f"{html_escape(plot_text)}"
         )
 
     return text
@@ -1476,20 +1591,33 @@ def build_language_keyboard(
 
     rows = []
 
+    current = []
+
     for language, data in LANGUAGES.items():
 
+        current.append(
+            InlineKeyboardButton(
+                text=data[
+                    "name"
+                ],
+                callback_data=cb_language(
+                    imdb_id,
+                    language,
+                ),
+            )
+        )
+
+        if len(current) == 2:
+
+            rows.append(
+                current
+            )
+
+            current = []
+
+    if current:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    text=data[
-                        "name"
-                    ],
-                    callback_data=cb_language(
-                        imdb_id,
-                        language,
-                    ),
-                )
-            ]
+            current
         )
 
     return InlineKeyboardMarkup(
@@ -1508,20 +1636,11 @@ def build_season_keyboard(
 
     rows = []
 
-    # Keep this lightweight.
-    #
-    # We don't query MongoDB here.
-    #
-    # User can select S01-S30.
-    #
-    # The actual database search happens only
-    # after GET FILES.
-
     current = []
 
     for season in range(
         1,
-        31,
+        SERIES_MAX_SEASON + 1,
     ):
 
         current.append(
@@ -1535,9 +1654,7 @@ def build_season_keyboard(
             )
         )
 
-        if len(
-            current
-        ) == 3:
+        if len(current) == 5:
 
             rows.append(
                 current
@@ -1546,7 +1663,6 @@ def build_season_keyboard(
             current = []
 
     if current:
-
         rows.append(
             current
         )
@@ -1596,9 +1712,7 @@ def build_quality_keyboard(
             )
         )
 
-        if len(
-            current
-        ) == 2:
+        if len(current) == 3:
 
             rows.append(
                 current
@@ -1607,7 +1721,6 @@ def build_quality_keyboard(
             current = []
 
     if current:
-
         rows.append(
             current
         )
@@ -1646,13 +1759,7 @@ def build_get_files_keyboard(
 
 
 # ============================================================
-# SERIES SEARCH HANDLER
-# ============================================================
-#
-# ONLY this group.
-#
-# This handler does NOT query MongoDB.
-#
+# SERIES GROUP SEARCH
 # ============================================================
 
 @Client.on_message(
@@ -1663,17 +1770,18 @@ def build_get_files_keyboard(
             "help",
         ]
     ),
-    group=-100,
+    group=-1000,
 )
-async def downtownvilla_series_search(
+async def series_group_search(
     app,
     message,
 ):
 
-    if SERIES_CHAT_ID is None:
-        return
-
-    if message.chat.id != SERIES_CHAT_ID:
+    if (
+        SERIES_CHAT_ID is None
+        or message.chat.id
+        != SERIES_CHAT_ID
+    ):
         return
 
     query = (
@@ -1683,117 +1791,81 @@ async def downtownvilla_series_search(
     if not query:
         return
 
-    if query.startswith(
-        "/"
-    ):
+    if query.startswith("/"):
         return
 
-    # --------------------------------------------------------
-    # SEARCH IMDb ONLY.
-    # --------------------------------------------------------
+    try:
 
-    msg = await message.reply_text(
-        "🔎 <b>Searching series...</b>",
-        parse_mode=enums.ParseMode.HTML,
-    )
-
-    candidates = await get_series_candidates(
-        query
-    )
-
-    # --------------------------------------------------------
-    # Only show TV candidates.
-    #
-    # Movies are NOT displayed as series.
-    # --------------------------------------------------------
-
-    series_candidates = [
-        x
-        for x in candidates
-        if x.get(
-            "is_tv",
-            False
-        )
-    ]
-
-    # --------------------------------------------------------
-    # No series.
-    # --------------------------------------------------------
-
-    if not series_candidates:
-
-        text = (
-            "❌ <b>No series found.</b>\n\n"
-            f"🔎 {escape_html(query)}"
+        msg = await message.reply_text(
+            "🔎 <b>Finding the correct series...</b>",
+            parse_mode=enums.ParseMode.HTML,
         )
 
-        buttons = []
+        candidates = await imdb_search(
+            query
+        )
 
-        if MOVIE_GROUP_LINK:
+        if not candidates:
 
-            buttons.append(
-                [
-                    InlineKeyboardButton(
-                        text="🎬 MOVIE GROUP",
-                        url=MOVIE_GROUP_LINK,
-                    )
-                ]
+            buttons = []
+
+            if MOVIE_GROUP_LINK:
+
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            text="🎬 MOVIE GROUP",
+                            url=MOVIE_GROUP_LINK,
+                        )
+                    ]
+                )
+
+            markup = (
+                InlineKeyboardMarkup(
+                    buttons
+                )
+                if buttons
+                else None
             )
-
-        markup = (
-            InlineKeyboardMarkup(
-                buttons
-            )
-            if buttons
-            else None
-        )
-
-        try:
 
             await msg.edit_text(
-                text,
+                "❌ <b>No TV series found.</b>\n\n"
+                f"🔎 {html_escape(query)}",
                 reply_markup=markup,
                 parse_mode=enums.ParseMode.HTML,
             )
 
-        except Exception:
+            return
 
-            pass
-
-        return
-
-    # --------------------------------------------------------
-    # Results.
-    # --------------------------------------------------------
-
-    text = (
-        "📺 <b>SELECT SERIES</b>\n\n"
-        f"🔎 Search: <b>{escape_html(query)}</b>\n\n"
-        "Choose the correct series:"
-    )
-
-    try:
+        text = (
+            "📺 <b>SELECT SERIES</b>\n\n"
+            f"🔎 Search: <b>{html_escape(query)}</b>\n\n"
+            "Select the correct series:"
+        )
 
         await msg.edit_text(
             text,
             reply_markup=build_search_keyboard(
-                series_candidates
+                candidates
             ),
             parse_mode=enums.ParseMode.HTML,
         )
 
-    except Exception:
+    except Exception as e:
 
-        pass
+        logger.exception(
+            "[SERIES] Group search error: %s",
+            e,
+        )
 
 
 # ============================================================
-# TITLE SELECT
+# TITLE SELECTION IN SERIES GROUP
 # ============================================================
 
 @Client.on_callback_query(
     filters.regex(
-        r"^stv:"
+        r"^st:"
     )
 )
 async def series_title_callback(
@@ -1808,18 +1880,18 @@ async def series_title_callback(
     ):
 
         await query.answer(
-            "Series system is not available here.",
+            "This button is only available in the series group.",
             show_alert=True,
         )
 
         return
 
     imdb_id = query.data[
-        4:
+        3:
     ]
 
     await query.answer(
-        "📺 Loading..."
+        "Loading IMDb..."
     )
 
     details = await get_series_details(
@@ -1829,27 +1901,20 @@ async def series_title_callback(
     if not details:
 
         await query.message.edit_text(
-            "❌ Unable to load IMDb information.",
-            parse_mode=enums.ParseMode.HTML,
+            "❌ Unable to load IMDb information."
         )
 
         return
 
-    # --------------------------------------------------------
-    # Save only in RAM.
-    # --------------------------------------------------------
+    title = details.get(
+        "title",
+        "Series",
+    )
 
-    USER_SERIES_STATE[
-        query.from_user.id
-    ] = {
-        "imdb_id": imdb_id,
-        "title": details.get(
-            "title",
-            "",
-        ),
-    }
-
-    cleanup_state()
+    pm_link = await build_pm_link(
+        app,
+        imdb_id,
+    )
 
     text = build_details_text(
         details
@@ -1857,7 +1922,40 @@ async def series_title_callback(
 
     text += (
         "\n\n"
-        "🌐 <b>Select Language</b>"
+        "👇 <b>Continue in PM to select "
+        "language, season and quality.</b>"
+    )
+
+    buttons = []
+
+    if pm_link:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"📺 {title}",
+                    url=pm_link,
+                )
+            ]
+        )
+
+    if MOVIE_GROUP_LINK:
+
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🎬 MOVIE GROUP",
+                    url=MOVIE_GROUP_LINK,
+                )
+            ]
+        )
+
+    markup = (
+        InlineKeyboardMarkup(
+            buttons
+        )
+        if buttons
+        else None
     )
 
     # --------------------------------------------------------
@@ -1876,13 +1974,164 @@ async def series_title_callback(
             await query.message.delete()
 
         except Exception:
-
             pass
 
         try:
 
             await app.send_photo(
-                chat_id=query.message.chat.id,
+                chat_id=SERIES_CHAT_ID,
+                photo=details[
+                    "poster"
+                ],
+                caption=text,
+                reply_markup=markup,
+            )
+
+            return
+
+        except Exception as e:
+
+            logger.warning(
+                "[SERIES] Poster send failed: %s",
+                e,
+            )
+
+    try:
+
+        await query.message.edit_text(
+            text,
+            reply_markup=markup,
+            parse_mode=enums.ParseMode.HTML,
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# PM /start HANDLER
+# ============================================================
+#
+# Link:
+#
+# https://t.me/BOT?start=series_0944947
+#
+# The user opens the bot and presses START.
+#
+# This handler catches only series deep-link starts.
+#
+# ============================================================
+
+@Client.on_message(
+    filters.private
+    & filters.command("start"),
+    group=-2000,
+)
+async def series_start_handler(
+    app,
+    message,
+):
+
+    if not message.command:
+        return
+
+    if len(
+        message.command
+    ) < 2:
+        return
+
+    payload = str(
+        message.command[1]
+    ).strip()
+
+    if not payload.startswith(
+        "series_"
+    ):
+        return
+
+    imdb_id = payload[
+        7:
+    ]
+
+    if not imdb_id:
+        return
+
+    # --------------------------------------------------------
+    # Prevent another generic /start handler from processing
+    # this same update.
+    # --------------------------------------------------------
+
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    await show_series_pm_home(
+        app,
+        message.chat.id,
+        imdb_id,
+    )
+
+    raise StopPropagation
+
+
+# ============================================================
+# PM HOME
+# ============================================================
+
+async def show_series_pm_home(
+    app,
+    chat_id,
+    imdb_id,
+):
+
+    details = await get_series_details(
+        imdb_id
+    )
+
+    if not details:
+
+        await app.send_message(
+            chat_id,
+            "❌ Unable to load the series information."
+        )
+
+        return
+
+    title = details.get(
+        "title",
+        "Series",
+    )
+
+    text = build_details_text(
+        details
+    )
+
+    text += (
+        "\n\n"
+        "🌐 <b>Select Language</b>"
+    )
+
+    USER_SERIES_STATE[
+        chat_id
+    ] = {
+        "imdb_id": imdb_id,
+        "title": title,
+    }
+
+    cleanup_user_state()
+
+    if (
+        SERIES_POSTER
+        and details.get(
+            "poster"
+        )
+    ):
+
+        try:
+
+            await app.send_photo(
+                chat_id=chat_id,
                 photo=details[
                     "poster"
                 ],
@@ -1897,38 +2146,40 @@ async def series_title_callback(
         except Exception as e:
 
             logger.warning(
-                "[SERIES] Poster failed: %s",
+                "[SERIES] PM poster failed: %s",
                 e,
             )
 
-    try:
-
-        await query.message.edit_text(
-            text,
-            reply_markup=build_language_keyboard(
-                imdb_id
-            ),
-            parse_mode=enums.ParseMode.HTML,
-        )
-
-    except Exception:
-
-        pass
+    await app.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=build_language_keyboard(
+            imdb_id
+        ),
+        parse_mode=enums.ParseMode.HTML,
+    )
 
 
 # ============================================================
-# LANGUAGE SELECT
+# LANGUAGE CALLBACK
 # ============================================================
 
 @Client.on_callback_query(
     filters.regex(
-        r"^slg:"
+        r"^sl:"
     )
 )
 async def series_language_callback(
     app,
     query,
 ):
+
+    if not query.message.chat.type == enums.ChatType.PRIVATE:
+        await query.answer(
+            "Please continue in PM.",
+            show_alert=True,
+        )
+        return
 
     parts = query.data.split(
         ":"
@@ -1940,9 +2191,12 @@ async def series_language_callback(
     imdb_id = parts[1]
     language = parts[2]
 
+    if language not in LANGUAGES:
+        return
+
     state = USER_SERIES_STATE.setdefault(
         query.from_user.id,
-        {}
+        {},
     )
 
     state[
@@ -1952,17 +2206,6 @@ async def series_language_callback(
     state[
         "language"
     ] = language
-
-    # --------------------------------------------------------
-    # THIS is the plain text representation.
-    #
-    # We do not store "English".
-    #
-    # We store:
-    #
-    # eng
-    #
-    # --------------------------------------------------------
 
     state[
         "language_token"
@@ -1978,14 +2221,17 @@ async def series_language_callback(
     )
 
     await query.answer(
-        f"Language: {language}"
+        f"{LANGUAGES[language]['short']} selected"
     )
 
     text = (
         "📺 <b>"
-        f"{escape_html(title)}"
+        f"{html_escape(title)}"
         "</b>\n\n"
-        f"🌐 Language: <b>{language}</b>\n\n"
+
+        f"🌐 Language: "
+        f"<b>{LANGUAGES[language]['name']}</b>\n\n"
+
         "📚 <b>Select Season</b>"
     )
 
@@ -2002,22 +2248,45 @@ async def series_language_callback(
 
     except Exception:
 
-        pass
+        # This can happen if the previous message was a photo.
+        # Send a fresh message instead.
+
+        try:
+
+            await app.send_message(
+                query.message.chat.id,
+                text,
+                reply_markup=build_season_keyboard(
+                    imdb_id,
+                    language,
+                ),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+        except Exception:
+            pass
 
 
 # ============================================================
-# SEASON SELECT
+# SEASON CALLBACK
 # ============================================================
 
 @Client.on_callback_query(
     filters.regex(
-        r"^ssn:"
+        r"^ss:"
     )
 )
 async def series_season_callback(
     app,
     query,
 ):
+
+    if not query.message.chat.type == enums.ChatType.PRIVATE:
+        await query.answer(
+            "Please continue in PM.",
+            show_alert=True,
+        )
+        return
 
     parts = query.data.split(
         ":"
@@ -2028,16 +2297,23 @@ async def series_season_callback(
 
     imdb_id = parts[1]
     language = parts[2]
-    season = parse_int(
-        parts[3]
-    )
+
+    try:
+        season = int(
+            parts[3]
+        )
+    except Exception:
+        return
 
     if season <= 0:
         return
 
+    if season > SERIES_MAX_SEASON:
+        return
+
     state = USER_SERIES_STATE.setdefault(
         query.from_user.id,
-        {}
+        {},
     )
 
     state[
@@ -2052,22 +2328,9 @@ async def series_season_callback(
         "season"
     ] = season
 
-    # --------------------------------------------------------
-    # Store:
-    #
-    # S01
-    #
-    # not:
-    #
-    # Season 1
-    #
-    # --------------------------------------------------------
-
     state[
         "season_token"
-    ] = (
-        f"S{season:02d}"
-    )
+    ] = f"S{season:02d}"
 
     details = await get_series_details(
         imdb_id
@@ -2079,15 +2342,20 @@ async def series_season_callback(
     )
 
     await query.answer(
-        f"Season {season}"
+        f"S{season:02d} selected"
     )
 
     text = (
         "📺 <b>"
-        f"{escape_html(title)}"
+        f"{html_escape(title)}"
         "</b>\n\n"
-        f"🌐 Language: <b>{language}</b>\n"
-        f"📚 Season: <b>S{season:02d}</b>\n\n"
+
+        f"🌐 Language: "
+        f"<b>{LANGUAGES.get(language, {}).get('name', language)}</b>\n"
+
+        f"📚 Season: "
+        f"<b>S{season:02d}</b>\n\n"
+
         "🎯 <b>Select Quality</b>"
     )
 
@@ -2105,22 +2373,43 @@ async def series_season_callback(
 
     except Exception:
 
-        pass
+        try:
+
+            await app.send_message(
+                query.message.chat.id,
+                text,
+                reply_markup=build_quality_keyboard(
+                    imdb_id,
+                    language,
+                    season,
+                ),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+        except Exception:
+            pass
 
 
 # ============================================================
-# QUALITY SELECT
+# QUALITY CALLBACK
 # ============================================================
 
 @Client.on_callback_query(
     filters.regex(
-        r"^sql:"
+        r"^sq:"
     )
 )
 async def series_quality_callback(
     app,
     query,
 ):
+
+    if not query.message.chat.type == enums.ChatType.PRIVATE:
+        await query.answer(
+            "Please continue in PM.",
+            show_alert=True,
+        )
+        return
 
     parts = query.data.split(
         ":"
@@ -2132,17 +2421,22 @@ async def series_quality_callback(
     imdb_id = parts[1]
     language = parts[2]
 
-    season = parse_int(
-        parts[3]
-    )
+    try:
 
-    quality = parse_int(
-        parts[4]
-    )
+        season = int(
+            parts[3]
+        )
+
+        quality = int(
+            parts[4]
+        )
+
+    except Exception:
+        return
 
     state = USER_SERIES_STATE.setdefault(
         query.from_user.id,
-        {}
+        {},
     )
 
     state[
@@ -2162,6 +2456,14 @@ async def series_quality_callback(
     ] = quality
 
     state[
+        "language_token"
+    ] = language
+
+    state[
+        "season_token"
+    ] = f"S{season:02d}"
+
+    state[
         "quality_token"
     ] = quality_text(
         quality
@@ -2176,16 +2478,14 @@ async def series_quality_callback(
         "Series",
     )
 
-    await query.answer(
-        "Quality selected"
-    )
-
     # --------------------------------------------------------
-    # The exact compact search representation:
+    # This is the compact search representation requested.
+    #
+    # Example:
     #
     # Game of Thrones eng S01 1080p
     #
-    # This is only created here.
+    # It is kept only in RAM.
     # --------------------------------------------------------
 
     search_string = (
@@ -2199,24 +2499,31 @@ async def series_quality_callback(
         "search_string"
     ] = search_string
 
+    await query.answer(
+        "Quality selected"
+    )
+
     text = (
         "📺 <b>"
-        f"{escape_html(title)}"
+        f"{html_escape(title)}"
         "</b>\n\n"
 
-        f"🌐 Language: <b>{language}</b>\n"
-        f"📚 Season: <b>S{season:02d}</b>\n"
-        f"🎯 Quality: <b>"
-        f"{quality_text(quality)}"
-        "</b>\n\n"
+        f"🌐 Language: "
+        f"<b>{LANGUAGES.get(language, {}).get('name', language)}</b>\n"
 
-        "🔎 <b>Ready to search</b>\n\n"
+        f"📚 Season: "
+        f"<b>S{season:02d}</b>\n"
 
-        f"<code>"
-        f"{escape_html(search_string)}"
-        f"</code>\n\n"
+        f"🎯 Quality: "
+        f"<b>{quality_text(quality)}</b>\n\n"
 
-        "Press <b>GET FILES</b>."
+        "🔎 <b>READY</b>\n\n"
+
+        "<code>"
+        f"{html_escape(search_string)}"
+        "</code>\n\n"
+
+        "Press <b>GET FILES</b> to search the database."
     )
 
     try:
@@ -2233,27 +2540,29 @@ async def series_quality_callback(
         )
 
     except Exception:
-
         pass
 
 
 # ============================================================
-# GET FILES
-# ============================================================
-#
-# ONLY HERE MongoDB is searched.
-#
+# GET FILES CALLBACK
 # ============================================================
 
 @Client.on_callback_query(
     filters.regex(
-        r"^get:"
+        r"^gf:"
     )
 )
 async def series_get_files_callback(
     app,
     query,
 ):
+
+    if not query.message.chat.type == enums.ChatType.PRIVATE:
+        await query.answer(
+            "Please continue in PM.",
+            show_alert=True,
+        )
+        return
 
     parts = query.data.split(
         ":"
@@ -2265,16 +2574,27 @@ async def series_get_files_callback(
     imdb_id = parts[1]
     language = parts[2]
 
-    season = parse_int(
-        parts[3]
-    )
+    try:
 
-    quality = parse_int(
-        parts[4]
-    )
+        season = int(
+            parts[3]
+        )
+
+        quality = int(
+            parts[4]
+        )
+
+    except Exception:
+        return
+
+    if language not in LANGUAGES:
+        return
+
+    if season <= 0:
+        return
 
     # --------------------------------------------------------
-    # Get title.
+    # IMDb title.
     # --------------------------------------------------------
 
     details = await get_series_details(
@@ -2300,56 +2620,119 @@ async def series_get_files_callback(
     )
 
     # --------------------------------------------------------
-    # Show searching state.
+    # Save state.
+    # --------------------------------------------------------
+
+    state = USER_SERIES_STATE.setdefault(
+        query.from_user.id,
+        {},
+    )
+
+    state[
+        "imdb_id"
+    ] = imdb_id
+
+    state[
+        "title"
+    ] = title
+
+    state[
+        "language"
+    ] = language
+
+    state[
+        "season"
+    ] = season
+
+    state[
+        "quality"
+    ] = quality
+
+    state[
+        "search_string"
+    ] = (
+        f"{title} "
+        f"{language} "
+        f"S{season:02d} "
+        f"{quality_text(quality)}"
+    )
+
+    # --------------------------------------------------------
+    # Searching message.
     # --------------------------------------------------------
 
     try:
 
         await query.message.edit_text(
             "🔎 <b>SEARCHING FILES...</b>\n\n"
-            f"📺 {escape_html(title)}\n"
-            f"🌐 {language}\n"
+
+            f"📺 <b>{html_escape(title)}</b>\n"
+            f"🌐 {LANGUAGES[language]['short']}\n"
             f"📚 S{season:02d}\n"
             f"🎯 {quality_text(quality)}\n\n"
-            "⏳ Please wait...",
+
+            "⚡ Searching Media + Media2 + Media3...",
             parse_mode=enums.ParseMode.HTML,
         )
 
     except Exception:
-
         pass
 
     # --------------------------------------------------------
-    # TARGETED DB SEARCH.
+    # THIS is the ONLY point where MongoDB is searched.
     # --------------------------------------------------------
 
-    files = await search_series_files(
+    started = asyncio.get_running_loop().time()
+
+    files = await search_series_candidates(
         title=title,
         language=language,
         season=season,
         quality=quality,
     )
 
+    elapsed = (
+        asyncio.get_running_loop().time()
+        - started
+    )
+
     # --------------------------------------------------------
-    # Pick one best file per episode.
+    # Select one best file per episode.
     # --------------------------------------------------------
 
     best_files = choose_best_episode_files(
         files
     )
 
+    episode_numbers = sorted(
+        best_files.keys()
+    )
+
+    if SERIES_MAX_EPISODES > 0:
+
+        episode_numbers = (
+            episode_numbers[
+                :SERIES_MAX_EPISODES
+            ]
+        )
+
     # --------------------------------------------------------
-    # Nothing.
+    # No results.
     # --------------------------------------------------------
 
-    if not best_files:
+    if not episode_numbers:
 
         text = (
             "❌ <b>NO FILES FOUND</b>\n\n"
-            f"📺 <b>{escape_html(title)}</b>\n"
-            f"🌐 Language: <b>{language}</b>\n"
-            f"📚 Season: <b>S{season:02d}</b>\n"
-            f"🎯 Quality: <b>{quality_text(quality)}</b>\n\n"
+
+            f"📺 <b>{html_escape(title)}</b>\n"
+            f"🌐 {LANGUAGES[language]['short']}\n"
+            f"📚 S{season:02d}\n"
+            f"🎯 {quality_text(quality)}\n\n"
+
+            f"⚡ Search time: "
+            f"<b>{elapsed:.2f}s</b>\n\n"
+
             "Try another language or quality."
         )
 
@@ -2361,67 +2744,47 @@ async def series_get_files_callback(
             )
 
         except Exception:
-
             pass
 
         return
 
     # --------------------------------------------------------
-    # Episodes.
+    # Display found episodes.
     # --------------------------------------------------------
-
-    episode_numbers = sorted(
-        best_files.keys()
-    )
-
-    if (
-        SERIES_MAX_EPISODES
-        > 0
-    ):
-
-        episode_numbers = (
-            episode_numbers[
-                :SERIES_MAX_EPISODES
-            ]
-        )
 
     text = (
         "✅ <b>FILES FOUND</b>\n\n"
-        f"📺 <b>{escape_html(title)}</b>\n"
-        f"🌐 {language}\n"
+
+        f"📺 <b>{html_escape(title)}</b>\n"
+        f"🌐 {LANGUAGES[language]['short']}\n"
         f"📚 S{season:02d}\n"
         f"🎯 {quality_text(quality)}\n\n"
-        f"📦 Episodes: <b>{len(episode_numbers)}</b>\n\n"
-    )
 
-    # --------------------------------------------------------
-    # Show episode list.
-    # --------------------------------------------------------
+        f"📦 Episodes: "
+        f"<b>{len(episode_numbers)}</b>\n"
 
-    text += (
-        "🎞 <b>AVAILABLE EPISODES</b>\n\n"
+        f"⚡ Search: "
+        f"<b>{elapsed:.2f}s</b>\n\n"
+
+        "🎞 <b>EPISODES</b>\n\n"
     )
 
     for episode in episode_numbers:
 
-        file = best_files[
+        document = best_files[
             episode
         ]
 
-        filename = file.get(
+        filename = document.get(
             "file_name",
             f"E{episode:02d}",
         )
 
         text += (
-            f"• E{episode:02d} "
-            f"— "
-            f"{escape_html(filename[:70])}\n"
+            f"• <b>E{episode:02d}</b>"
+            f" — "
+            f"{html_escape(filename[:75])}\n"
         )
-
-    # --------------------------------------------------------
-    # SEND FILES.
-    # --------------------------------------------------------
 
     try:
 
@@ -2431,51 +2794,53 @@ async def series_get_files_callback(
         )
 
     except Exception:
-
         pass
+
+    # --------------------------------------------------------
+    # SEND ACTUAL FILES.
+    #
+    # NO STREAMING.
+    # --------------------------------------------------------
 
     sent = 0
 
     for episode in episode_numbers:
 
-        file = best_files[
+        document = best_files[
             episode
         ]
 
         # ----------------------------------------------------
-        # Important:
+        # Your database model stores:
         #
-        # Your DB may store Telegram cached file ID in:
+        # file_id = Mongo _id
+        # file_ref = separate Telegram reference
         #
-        # file_id
-        #
-        # or another field.
-        #
-        # We check the common fields.
+        # We prefer file_id.
         # ----------------------------------------------------
 
-        file_id = (
-            file.get(
-                "file_id"
-            )
-            or file.get(
-                "file_ref"
-            )
+        file_id = document.get(
+            "file_id"
+        )
+
+        file_ref = document.get(
+            "file_ref"
         )
 
         if not file_id:
 
             logger.warning(
-                "[SERIES] Missing file_id for E%02d: %s",
+                "[SERIES] Missing file_id "
+                "for E%02d | %s",
                 episode,
-                file.get(
+                document.get(
                     "file_name"
                 ),
             )
 
             continue
 
-        filename = file.get(
+        filename = document.get(
             "file_name",
             f"E{episode:02d}",
         )
@@ -2513,13 +2878,15 @@ async def series_get_files_callback(
 
             sent += 1
 
-            await asyncio.sleep(
-                SERIES_SEND_DELAY
-            )
+            if SERIES_SEND_DELAY > 0:
+
+                await asyncio.sleep(
+                    SERIES_SEND_DELAY
+                )
 
         except FloodWait as e:
 
-            wait = int(
+            wait_time = int(
                 getattr(
                     e,
                     "value",
@@ -2527,8 +2894,13 @@ async def series_get_files_callback(
                 )
             )
 
+            logger.warning(
+                "[SERIES] FloodWait %ss",
+                wait_time,
+            )
+
             await asyncio.sleep(
-                wait + 2
+                wait_time + 1
             )
 
             try:
@@ -2543,67 +2915,76 @@ async def series_get_files_callback(
 
                 sent += 1
 
-            except Exception:
+            except Exception as retry_error:
 
                 logger.exception(
-                    "[SERIES] Retry failed E%02d",
+                    "[SERIES] Retry failed "
+                    "E%02d: %s",
                     episode,
+                    retry_error,
                 )
 
-        except RPCError:
+        except RPCError as e:
 
             logger.exception(
-                "[SERIES] Telegram error E%02d",
+                "[SERIES] Telegram error "
+                "E%02d: %s",
                 episode,
+                e,
             )
 
-        except Exception:
+        except Exception as e:
 
             logger.exception(
-                "[SERIES] Failed E%02d",
+                "[SERIES] Failed sending "
+                "E%02d: %s",
                 episode,
+                e,
             )
 
     # --------------------------------------------------------
-    # COMPLETE.
+    # Complete.
     # --------------------------------------------------------
 
     try:
 
         await query.message.reply_text(
             "✅ <b>SEASON COMPLETE</b>\n\n"
-            f"📺 <b>{escape_html(title)}</b>\n"
-            f"📚 Season: <b>S{season:02d}</b>\n"
-            f"🎯 Quality: <b>{quality_text(quality)}</b>\n\n"
-            f"📦 Sent: <b>{sent}</b>/"
-            f"<b>{len(episode_numbers)}</b>",
+
+            f"📺 <b>{html_escape(title)}</b>\n"
+            f"🌐 {LANGUAGES[language]['short']}\n"
+            f"📚 S{season:02d}\n"
+            f"🎯 {quality_text(quality)}\n\n"
+
+            f"📦 Sent: "
+            f"<b>{sent}/{len(episode_numbers)}</b>\n"
+
+            f"⚡ Search: "
+            f"<b>{elapsed:.2f}s</b>",
             parse_mode=enums.ParseMode.HTML,
         )
 
     except Exception:
-
         pass
 
 
 # ============================================================
-# OPTIONAL CACHE CLEAR
+# OPTIONAL MEMORY CLEAR
 # ============================================================
 
 def clear_series_memory():
 
     IMDB_SEARCH_CACHE.clear()
-
     IMDB_DETAILS_CACHE.clear()
-
     USER_SERIES_STATE.clear()
 
     logger.info(
-        "[SERIES] Memory cache cleared."
+        "[SERIES] All series memory caches cleared."
     )
 
 
 # ============================================================
-# STARTUP
+# STARTUP LOG
 # ============================================================
 
 logger.info(
@@ -2611,7 +2992,7 @@ logger.info(
 )
 
 logger.info(
-    "[SERIES] DowntownVilla Series System Loaded"
+    "[SERIES] DowntownVilla Ultimate Series System"
 )
 
 logger.info(
@@ -2629,6 +3010,15 @@ logger.info(
 )
 
 logger.info(
+    "[SERIES] Multiple DB: %s",
+    MULTIPLE_DB,
+)
+
+logger.info(
+    "[SERIES] Databases: Media / Media2 / Media3"
+)
+
+logger.info(
     "[SERIES] Poster: %s",
     SERIES_POSTER,
 )
@@ -2640,9 +3030,14 @@ logger.info(
 )
 
 logger.info(
-    "[SERIES] MongoDB is queried ONLY after GET FILES."
+    "[SERIES] MongoDB search occurs ONLY on GET FILES."
+)
+
+logger.info(
+    "[SERIES] STREAMING: DISABLED"
 )
 
 logger.info(
     "=================================================="
 )
+```
