@@ -48,15 +48,10 @@ BACKUP_UPLOAD_DELAY = float(
 
 
 # ============================================================
-# BACKUP TRACKING COLLECTION
+# BACKUP STATUS COLLECTION
 #
-# IMPORTANT:
 # This is a NEW collection.
-#
-# It does NOT modify:
-#     Media
-#     Media2
-#     Media3
+# It does NOT modify Media / Media2 / Media3.
 # ============================================================
 
 backup_collection = db["dreamx_backup_status"]
@@ -85,17 +80,12 @@ backup_last_activity = None
 
 backup_lock = asyncio.Lock()
 
-# The actual Pyrogram Client.
-#
-# IMPORTANT:
-# This is NOT the MongoDB client from ia_filterdb.py.
 pyrogram_app = None
 
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
-
 
 def get_channel_id():
     if not BACKUP_CHANNEL_ID:
@@ -106,7 +96,7 @@ def get_channel_id():
     except Exception:
         logger.error(
             "[BACKUP] Invalid BACKUP_CHANNEL_ID: %s",
-            BACKUP_CHANNEL_ID,
+            BACKUP_CHANNEL_ID
         )
         return None
 
@@ -120,9 +110,7 @@ def utc_now():
 
 
 def utc_text():
-    return utc_now().strftime(
-        "%Y-%m-%d %H:%M:%S UTC"
-    )
+    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
 def format_bytes(size):
@@ -155,20 +143,9 @@ def format_duration(seconds):
 
     seconds = int(seconds)
 
-    days, seconds = divmod(
-        seconds,
-        86400,
-    )
-
-    hours, seconds = divmod(
-        seconds,
-        3600,
-    )
-
-    minutes, seconds = divmod(
-        seconds,
-        60,
-    )
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
 
     parts = []
 
@@ -207,41 +184,34 @@ def get_processed_count():
 
 
 # ============================================================
-# FILE ID HELPER
+# DATABASE FILE ID
 # ============================================================
 
-
 def get_database_file_id(file):
-    """
-    umongo Document exposes file_id because the field is:
-
-        file_id = fields.StrField(attribute="_id")
-
-    This helper safely handles both file_id and _id.
-    """
-
     file_id = getattr(
         file,
         "file_id",
-        None,
+        None
     )
 
     if file_id:
-        return file_id
+        return str(file_id)
 
     file_id = getattr(
         file,
         "_id",
-        None,
+        None
     )
 
-    return file_id
+    if file_id:
+        return str(file_id)
+
+    return None
 
 
 # ============================================================
-# BACKUP TRACKING
+# BACKUP STATUS
 # ============================================================
-
 
 async def is_backed_up(file_id):
     if not file_id:
@@ -260,7 +230,7 @@ async def is_backed_up(file_id):
     except Exception:
         logger.exception(
             "[BACKUP] Error checking backup status: %s",
-            file_id,
+            file_id
         )
 
         return False
@@ -269,7 +239,7 @@ async def is_backed_up(file_id):
 async def mark_completed(
     file_id,
     source_db,
-    message_id=None,
+    message_id=None
 ):
     try:
         await backup_collection.update_one(
@@ -293,15 +263,14 @@ async def mark_completed(
 
     except Exception:
         logger.exception(
-            "[BACKUP] Failed to save completed status: %s",
-            file_id,
+            "[BACKUP] Failed saving completed status."
         )
 
 
 async def mark_failed(
     file_id,
     source_db,
-    error,
+    error
 ):
     try:
         await backup_collection.update_one(
@@ -321,20 +290,19 @@ async def mark_failed(
 
     except Exception:
         logger.exception(
-            "[BACKUP] Failed to save failed status.",
+            "[BACKUP] Failed saving failed status."
         )
 
 
 # ============================================================
-# GET CAPTION
+# CAPTION
 # ============================================================
-
 
 def get_caption(file):
     caption = getattr(
         file,
         "caption",
-        None,
+        None
     )
 
     if caption:
@@ -343,7 +311,7 @@ def get_caption(file):
     file_name = getattr(
         file,
         "file_name",
-        None,
+        None
     )
 
     if file_name:
@@ -353,15 +321,14 @@ def get_caption(file):
 
 
 # ============================================================
-# GET COVER
+# COVER
 # ============================================================
-
 
 def get_cover(file):
     cover = getattr(
         file,
         "cover",
-        None,
+        None
     )
 
     if not cover:
@@ -371,14 +338,13 @@ def get_cover(file):
 
 
 # ============================================================
-# SEND ONE FILE
+# UPLOAD ONE FILE
 # ============================================================
-
 
 async def backup_one_file(
     app,
     source_db,
-    file,
+    file
 ):
     global backup_current_file
     global backup_current_db
@@ -393,6 +359,7 @@ async def backup_one_file(
     file_id = get_database_file_id(file)
 
     if not file_id:
+
         backup_total_failed += 1
 
         backup_last_error = (
@@ -401,25 +368,19 @@ async def backup_one_file(
 
         logger.error(
             "[BACKUP] File without file_id in %s",
-            source_db,
+            source_db
         )
 
         return False
 
-    file_id = str(file_id)
-
     file_name = getattr(
         file,
         "file_name",
-        "Unknown file",
+        "Unknown file"
     )
 
-    backup_current_file = str(
-        file_name
-    )
-
+    backup_current_file = str(file_name)
     backup_current_db = source_db
-
     backup_last_activity = utc_text()
 
     # --------------------------------------------------------
@@ -432,21 +393,16 @@ async def backup_one_file(
 
         logger.info(
             "[BACKUP] Already backed up: %s",
-            file_name,
+            file_name
         )
 
         return True
 
-    # --------------------------------------------------------
-    # CAPTION / COVER
-    # --------------------------------------------------------
-
     caption = get_caption(file)
-
     cover = get_cover(file)
 
     # --------------------------------------------------------
-    # SEND
+    # UPLOAD
     # --------------------------------------------------------
 
     try:
@@ -454,19 +410,12 @@ async def backup_one_file(
         logger.info(
             "[BACKUP] Uploading [%s] %s",
             source_db,
-            file_name,
+            file_name
         )
 
         while True:
 
             try:
-
-                # IMPORTANT:
-                #
-                # app is the REAL Pyrogram Client.
-                #
-                # Do NOT use the MongoDB client here.
-                #
 
                 send_kwargs = {
                     "chat_id": get_channel_id(),
@@ -477,7 +426,7 @@ async def backup_one_file(
                     send_kwargs["caption"] = caption
 
                 if cover:
-                    send_kwargs["cover"] = cover
+                    send_kwargs["thumb"] = cover
 
                 try:
 
@@ -487,14 +436,9 @@ async def backup_one_file(
 
                 except TypeError:
 
-                    # Some Pyrogram versions / media types
-                    # may reject the cover argument.
-                    #
-                    # Retry without cover.
-
                     send_kwargs.pop(
-                        "cover",
-                        None,
+                        "thumb",
+                        None
                     )
 
                     sent = await app.send_cached_media(
@@ -509,13 +453,13 @@ async def backup_one_file(
                     getattr(
                         e,
                         "value",
-                        30,
+                        30
                     )
                 )
 
                 logger.warning(
-                    "[BACKUP] FloodWait %s seconds.",
-                    wait_time,
+                    "[BACKUP] FloodWait: %s seconds",
+                    wait_time
                 )
 
                 await asyncio.sleep(
@@ -525,20 +469,17 @@ async def backup_one_file(
             except RPCError as e:
 
                 backup_total_failed += 1
-
                 backup_last_error = str(e)
 
                 logger.exception(
-                    "[BACKUP] Telegram RPC error "
-                    "for %s: %s",
-                    file_name,
-                    e,
+                    "[BACKUP] Telegram error for %s",
+                    file_name
                 )
 
                 await mark_failed(
                     file_id,
                     source_db,
-                    e,
+                    e
                 )
 
                 return False
@@ -546,24 +487,23 @@ async def backup_one_file(
             except Exception as e:
 
                 backup_total_failed += 1
-
                 backup_last_error = str(e)
 
                 logger.exception(
                     "[BACKUP] Upload failed: %s",
-                    e,
+                    e
                 )
 
                 await mark_failed(
                     file_id,
                     source_db,
-                    e,
+                    e
                 )
 
                 return False
 
         # ----------------------------------------------------
-        # MARK SUCCESS
+        # SUCCESS
         # ----------------------------------------------------
 
         await mark_completed(
@@ -572,18 +512,17 @@ async def backup_one_file(
             message_id=getattr(
                 sent,
                 "id",
-                None,
-            ),
+                None
+            )
         )
 
         backup_total_uploaded += 1
-
         backup_last_activity = utc_text()
 
         logger.info(
             "[BACKUP] SUCCESS [%s] %s",
             source_db,
-            file_name,
+            file_name
         )
 
         await asyncio.sleep(
@@ -595,41 +534,30 @@ async def backup_one_file(
     except Exception as e:
 
         backup_total_failed += 1
-
         backup_last_error = str(e)
 
         logger.exception(
             "[BACKUP] Unexpected upload error: %s",
-            e,
+            e
         )
 
         await mark_failed(
             file_id,
             source_db,
-            e,
+            e
         )
 
         return False
 
 
 # ============================================================
-# FIND UNBACKED FILES
+# SCAN ONE DATABASE
 # ============================================================
-
 
 async def scan_model(
     model,
-    source_db,
+    source_db
 ):
-    """
-    Scan one database collection.
-
-    We intentionally do NOT modify the original document.
-
-    The backup status is kept separately in:
-        dreamx_backup_status
-    """
-
     files_to_process = []
 
     try:
@@ -646,21 +574,15 @@ async def scan_model(
 
         for file in files:
 
-            file_id = get_database_file_id(
-                file
-            )
+            file_id = get_database_file_id(file)
 
             if not file_id:
                 continue
 
-            if await is_backed_up(
-                str(file_id)
-            ):
+            if await is_backed_up(file_id):
                 continue
 
-            files_to_process.append(
-                file
-            )
+            files_to_process.append(file)
 
             if len(files_to_process) >= BACKUP_BATCH_SIZE:
                 break
@@ -669,26 +591,22 @@ async def scan_model(
 
         logger.exception(
             "[BACKUP] Error scanning %s",
-            source_db,
+            source_db
         )
 
     return files_to_process
 
 
 # ============================================================
-# SCAN ALL THREE DATABASES
+# GET BACKUP BATCH
 # ============================================================
-
 
 async def get_backup_batch():
 
-    # --------------------------------------------------------
     # PRIMARY
-    # --------------------------------------------------------
-
     files = await scan_model(
         Media,
-        "Media",
+        "Media"
     )
 
     if files:
@@ -697,13 +615,10 @@ async def get_backup_batch():
             for file in files
         ]
 
-    # --------------------------------------------------------
     # SECONDARY
-    # --------------------------------------------------------
-
     files = await scan_model(
         Media2,
-        "Media2",
+        "Media2"
     )
 
     if files:
@@ -712,13 +627,10 @@ async def get_backup_batch():
             for file in files
         ]
 
-    # --------------------------------------------------------
     # TERTIARY
-    # --------------------------------------------------------
-
     files = await scan_model(
         Media3,
-        "Media3",
+        "Media3"
     )
 
     if files:
@@ -733,7 +645,6 @@ async def get_backup_batch():
 # ============================================================
 # BACKUP WORKER
 # ============================================================
-
 
 async def backup_worker(app):
 
@@ -767,13 +678,10 @@ async def backup_worker(app):
             return
 
         backup_running = True
-
         backup_started_at = utc_now()
-
         backup_finished_at = None
 
         backup_last_error = None
-
         backup_last_activity = utc_text()
 
         logger.info(
@@ -785,20 +693,12 @@ async def backup_worker(app):
         )
 
         logger.info(
-            "[BACKUP] Backup channel: %s",
-            get_channel_id(),
+            "[BACKUP] Watching Media / Media2 / Media3"
         )
 
         logger.info(
-            "[BACKUP] Watching Media"
-        )
-
-        logger.info(
-            "[BACKUP] Watching Media2"
-        )
-
-        logger.info(
-            "[BACKUP] Watching Media3"
+            "[BACKUP] Channel: %s",
+            get_channel_id()
         )
 
         logger.info(
@@ -812,20 +712,18 @@ async def backup_worker(app):
                 batch = await get_backup_batch()
 
                 # ------------------------------------------------
-                # Nothing currently waiting.
+                # NO FILES
                 #
-                # IMPORTANT:
+                # KEEP RUNNING.
                 #
-                # Do NOT stop the worker.
-                #
-                # Keep watching for newly added files.
+                # This is what allows newly indexed files
+                # to automatically enter the backup channel.
                 # ------------------------------------------------
 
                 if not batch:
 
                     backup_current_file = None
                     backup_current_db = None
-
                     backup_last_activity = utc_text()
 
                     await asyncio.sleep(
@@ -835,7 +733,7 @@ async def backup_worker(app):
                     continue
 
                 # ------------------------------------------------
-                # Process current batch
+                # UPLOAD BATCH
                 # ------------------------------------------------
 
                 for source_db, file in batch:
@@ -846,12 +744,10 @@ async def backup_worker(app):
                     await backup_one_file(
                         app,
                         source_db,
-                        file,
+                        file
                     )
 
-                    await asyncio.sleep(
-                        0.2
-                    )
+                    await asyncio.sleep(0.2)
 
         except asyncio.CancelledError:
 
@@ -867,13 +763,12 @@ async def backup_worker(app):
 
             logger.exception(
                 "[BACKUP] Worker crashed: %s",
-                e,
+                e
             )
 
         finally:
 
             backup_running = False
-
             backup_finished_at = utc_now()
 
             backup_current_file = None
@@ -885,9 +780,8 @@ async def backup_worker(app):
 
 
 # ============================================================
-# START WORKER
+# START BACKUP
 # ============================================================
-
 
 async def start_backup_worker(app):
 
@@ -899,12 +793,7 @@ async def start_backup_worker(app):
     if not backup_configured():
 
         logger.warning(
-            "[BACKUP] Cannot start."
-        )
-
-        logger.warning(
-            "[BACKUP] Add BACKUP_CHANNEL_ID "
-            "to Render environment variables."
+            "[BACKUP] BACKUP_CHANNEL_ID is missing."
         )
 
         return False
@@ -914,7 +803,7 @@ async def start_backup_worker(app):
         if not backup_task.done():
 
             logger.info(
-                "[BACKUP] Worker already active."
+                "[BACKUP] Worker already running."
             )
 
             return True
@@ -924,16 +813,15 @@ async def start_backup_worker(app):
     )
 
     logger.info(
-        "[BACKUP] Background worker created."
+        "[BACKUP] Background backup task created."
     )
 
     return True
 
 
 # ============================================================
-# STOP WORKER
+# STOP BACKUP
 # ============================================================
-
 
 async def stop_backup_worker():
 
@@ -951,12 +839,14 @@ async def stop_backup_worker():
     backup_task.cancel()
 
     try:
+
         await backup_task
 
     except asyncio.CancelledError:
         pass
 
     except Exception:
+
         logger.exception(
             "[BACKUP] Error stopping worker."
         )
@@ -965,9 +855,8 @@ async def stop_backup_worker():
 
 
 # ============================================================
-# ADMIN COMMAND: /backup
+# /BACKUP
 # ============================================================
-
 
 @Client.on_message(
     filters.command("backup")
@@ -975,7 +864,7 @@ async def stop_backup_worker():
 )
 async def backup_command(
     app,
-    message,
+    message
 ):
 
     if not backup_configured():
@@ -984,7 +873,7 @@ async def backup_command(
             "<b>❌ BACKUP CHANNEL NOT CONFIGURED</b>\n\n"
             "Add this Render environment variable:\n\n"
             "<code>BACKUP_CHANNEL_ID=-100xxxxxxxxxxxx</code>",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
         return
@@ -992,7 +881,7 @@ async def backup_command(
     channel_id = get_channel_id()
 
     # --------------------------------------------------------
-    # Test channel access
+    # CHECK CHANNEL
     # --------------------------------------------------------
 
     try:
@@ -1013,13 +902,13 @@ async def backup_command(
             f"<code>{str(e)[:1000]}</code>\n\n"
             "Make sure the bot is an administrator "
             "in the backup channel.",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
         return
 
     # --------------------------------------------------------
-    # Already running
+    # ALREADY RUNNING
     # --------------------------------------------------------
 
     if backup_running:
@@ -1028,17 +917,19 @@ async def backup_command(
             "<b>🚀 BACKUP IS ALREADY RUNNING</b>\n\n"
             f"📦 Channel: <b>{channel_name}</b>\n"
             f"🆔 <code>{channel_id}</code>\n\n"
-            "The worker is continuously watching "
-            "all three databases.\n\n"
+            "The backup worker is continuously watching "
+            "Media, Media2 and Media3.\n\n"
+            "New files added to the database will also "
+            "be backed up automatically.\n\n"
             "Use <code>/backup_status</code> "
             "for live status.",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
         return
 
     # --------------------------------------------------------
-    # Start
+    # START
     # --------------------------------------------------------
 
     started = await start_backup_worker(
@@ -1049,7 +940,7 @@ async def backup_command(
 
         await message.reply_text(
             "<b>❌ BACKUP COULD NOT START.</b>",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
         return
@@ -1068,29 +959,27 @@ async def backup_command(
         "• Media3\n\n"
 
         "📤 Existing files will be backed up.\n"
-        "🔄 New files will also be detected automatically.\n"
-        "♻️ Already backed-up files will not be uploaded again.\n\n"
+        "🔄 New database files will be detected automatically.\n"
+        "♻️ Already backed-up files will not be uploaded twice.\n\n"
 
         "📊 Use <code>/backup_status</code> "
-        "to see the transfer status.",
-        parse_mode=enums.ParseMode.HTML,
+        "for live transfer status.",
+        parse_mode=enums.ParseMode.HTML
     )
 
 
 # ============================================================
-# ADMIN COMMAND: /backup_status
+# /BACKUP_STATUS
 # ============================================================
-
 
 def build_status_text():
 
-    if backup_running:
-
-        status = "🟢 RUNNING"
-
-    else:
-
-        status = "🔴 STOPPED"
+    status = (
+        "🟢 RUNNING"
+        if backup_running
+        else
+        "🔴 STOPPED"
+    )
 
     processed = get_processed_count()
 
@@ -1110,6 +999,7 @@ def build_status_text():
         "<b>╚════════════════════════════╝</b>\n\n"
 
         f"📡 Status: <b>{status}</b>\n"
+
         f"📦 Channel: "
         f"<code>{get_channel_id() or 'NOT SET'}</code>\n\n"
 
@@ -1154,23 +1044,25 @@ def build_status_text():
 )
 async def backup_status_command(
     app,
-    message,
+    message
 ):
 
     await message.reply_text(
         build_status_text(),
+
         reply_markup=InlineKeyboardMarkup(
             [
                 [
                     InlineKeyboardButton(
                         "🔄 REFRESH",
-                        callback_data="backup_refresh",
+                        callback_data="backup_refresh"
                     )
                 ]
             ]
         ),
+
         parse_mode=enums.ParseMode.HTML,
-        disable_web_page_preview=True,
+        disable_web_page_preview=True
     )
 
 
@@ -1178,20 +1070,19 @@ async def backup_status_command(
 # REFRESH STATUS
 # ============================================================
 
-
 @Client.on_callback_query(
     filters.regex("^backup_refresh$")
 )
 async def backup_refresh_callback(
     app,
-    query,
+    query
 ):
 
     if query.from_user.id not in ADMINS:
 
         await query.answer(
             "❌ Admin only.",
-            show_alert=True,
+            show_alert=True
         )
 
         return
@@ -1200,18 +1091,20 @@ async def backup_refresh_callback(
 
         await query.message.edit_text(
             build_status_text(),
+
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
                             "🔄 REFRESH",
-                            callback_data="backup_refresh",
+                            callback_data="backup_refresh"
                         )
                     ]
                 ]
             ),
+
             parse_mode=enums.ParseMode.HTML,
-            disable_web_page_preview=True,
+            disable_web_page_preview=True
         )
 
         await query.answer(
@@ -1220,21 +1113,29 @@ async def backup_refresh_callback(
 
     except Exception as e:
 
+        # MESSAGE_NOT_MODIFIED is harmless.
+        if "MESSAGE_NOT_MODIFIED" in str(e):
+
+            await query.answer(
+                "✅ Already up to date."
+            )
+
+            return
+
         logger.exception(
             "[BACKUP] Status refresh error: %s",
-            e,
+            e
         )
 
         await query.answer(
             "Unable to refresh.",
-            show_alert=True,
+            show_alert=True
         )
 
 
 # ============================================================
-# ADMIN COMMAND: /backup_stats
+# /BACKUP_STATS
 # ============================================================
-
 
 @Client.on_message(
     filters.command("backup_stats")
@@ -1242,7 +1143,7 @@ async def backup_refresh_callback(
 )
 async def backup_stats_command(
     app,
-    message,
+    message
 ):
 
     try:
@@ -1284,7 +1185,7 @@ async def backup_stats_command(
 
         await message.reply_text(
             text,
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
     except Exception as e:
@@ -1292,14 +1193,13 @@ async def backup_stats_command(
         await message.reply_text(
             "<b>❌ ERROR</b>\n\n"
             f"<code>{str(e)[:1000]}</code>",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
 
 # ============================================================
-# ADMIN COMMAND: /backup_stop
+# /BACKUP_STOP
 # ============================================================
-
 
 @Client.on_message(
     filters.command("backup_stop")
@@ -1307,14 +1207,14 @@ async def backup_stats_command(
 )
 async def backup_stop_command(
     app,
-    message,
+    message
 ):
 
     if not backup_running:
 
         await message.reply_text(
             "🔴 <b>BACKUP IS NOT RUNNING.</b>",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
         return
@@ -1327,104 +1227,74 @@ async def backup_stop_command(
             "🛑 <b>BACKUP STOPPED</b>\n\n"
             "Successfully uploaded files remain "
             "marked as completed.\n\n"
-            "You can restart it anytime with "
+            "Restart anytime with "
             "<code>/backup</code>.",
-            parse_mode=enums.ParseMode.HTML,
+            parse_mode=enums.ParseMode.HTML
         )
 
     else:
 
         await message.reply_text(
-            "⚠️ Backup was already stopped.",
-            parse_mode=enums.ParseMode.HTML,
+            "⚠️ Backup was already stopped."
         )
 
 
 # ============================================================
-# AUTO START
+# AUTOMATIC START
 #
 # IMPORTANT:
-# This uses the REAL Pyrogram Client supplied by
-# Pyrogram's on_start callback.
 #
-# Therefore we NEVER use the MongoDB client for Telegram.
+# Pyrogram does NOT provide:
+#
+#     @Client.on_start()
+#
+# Therefore we use a normal plugin handler that runs once
+# when the bot receives its first private/admin message.
+#
+# ALSO:
+#
+# /backup still starts it manually.
 # ============================================================
 
+auto_start_done = False
 
-@Client.on_start()
-async def backup_on_start(app):
 
-    global pyrogram_app
+@Client.on_message(
+    filters.private
+    & filters.user(ADMINS)
+)
+async def backup_auto_start_handler(
+    app,
+    message
+):
 
-    pyrogram_app = app
+    global auto_start_done
 
-    logger.info(
-        "[BACKUP] Pyrogram client received."
-    )
+    if auto_start_done:
+        return
 
     if not BACKUP_AUTO_START:
-
-        logger.info(
-            "[BACKUP] BACKUP_AUTO_START=false"
-        )
-
         return
 
     if not backup_configured():
-
-        logger.warning(
-            "[BACKUP] Automatic backup disabled "
-            "because BACKUP_CHANNEL_ID is missing."
-        )
-
         return
 
-    # Give the main bot a few seconds to finish startup.
-
-    await asyncio.sleep(15)
+    auto_start_done = True
 
     try:
 
-        # Make sure channel is accessible.
+        if not backup_running:
 
-        await app.get_chat(
-            get_channel_id()
-        )
+            await start_backup_worker(
+                app
+            )
 
-    except Exception as e:
-
-        logger.exception(
-            "[BACKUP] Cannot access backup channel: %s",
-            e,
-        )
-
-        return
-
-    try:
-
-        await start_backup_worker(
-            app
-        )
-
-        logger.info(
-            "[BACKUP] ========================================"
-        )
-
-        logger.info(
-            "[BACKUP] AUTOMATIC BACKUP MONITOR STARTED"
-        )
-
-        logger.info(
-            "[BACKUP] ========================================"
-        )
+            logger.info(
+                "[BACKUP] Automatic backup monitor started."
+            )
 
     except Exception:
 
         logger.exception(
-            "[BACKUP] Failed to start automatic backup."
+            "[BACKUP] Automatic startup failed."
         )
-
-
-# ============================================================
-# END OF BACKUP.PY
-# ============================================================
