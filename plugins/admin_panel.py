@@ -54,9 +54,7 @@ logger = logging.getLogger(__name__)
 # PUT YOUR TELEGRAM USER ID HERE
 # ------------------------------------------------------------
 
-ADMIN_IDS = {
-    123456789,
-}
+ADMIN_IDS = set(map(int, os.getenv("ADMINS", "").split()))
 
 
 # ------------------------------------------------------------
