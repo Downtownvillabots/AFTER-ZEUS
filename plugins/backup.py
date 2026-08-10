@@ -12,7 +12,11 @@ from database.ia_filterdb import (
     Media2,
     Media3,
     db,
+    db2,
+    db3,
 )
+
+from info import COLLECTION_NAME
 
 try:
     from info import ADMINS
@@ -555,43 +559,165 @@ async def backup_one_file(
 # ============================================================
 
 async def scan_model(
-    model,
-    source_db
+    database,
+    source_db,
 ):
+    """
+    Directly scan the MongoDB collection.
+
+    This bypasses the umongo Document layer so the backup
+    system can reliably see every document in Media,
+    Media2 and Media3.
+
+    Original database documents are NEVER modified.
+    """
+
     files_to_process = []
 
     try:
 
-        cursor = (
-            model.find({})
-            .sort("$natural", 1)
-            .limit(BACKUP_BATCH_SIZE)
+        collection = database[COLLECTION_NAME]
+
+        # ----------------------------------------------------
+        # DEBUG: count documents
+        # ----------------------------------------------------
+
+        total_documents = await collection.count_documents({})
+
+        logger.info(
+            "[BACKUP] %s collection contains %s documents.",
+            source_db,
+            total_documents,
         )
 
-        files = await cursor.to_list(
+        if total_documents == 0:
+            logger.warning(
+                "[BACKUP] %s is EMPTY.",
+                source_db,
+            )
+            return []
+
+        # ----------------------------------------------------
+        # Read documents
+        # ----------------------------------------------------
+
+        cursor = (
+            collection
+            .find({})
+            .sort(
+                [("$natural", 1)]
+            )
+            .limit(
+                BACKUP_BATCH_SIZE
+            )
+        )
+
+        documents = await cursor.to_list(
             length=BACKUP_BATCH_SIZE
         )
 
-        for file in files:
+        logger.info(
+            "[BACKUP] %s: read %s documents.",
+            source_db,
+            len(documents),
+        )
 
-            file_id = get_database_file_id(file)
+        # ----------------------------------------------------
+        # Check backup status
+        # ----------------------------------------------------
+
+        for document in documents:
+
+            file_id = document.get(
+                "_id"
+            )
 
             if not file_id:
+
+                logger.warning(
+                    "[BACKUP] %s document has no _id.",
+                    source_db,
+                )
+
                 continue
 
-            if await is_backed_up(file_id):
+            file_id = str(
+                file_id
+            )
+
+            already_backed_up = (
+                await is_backed_up(
+                    file_id
+                )
+            )
+
+            if already_backed_up:
+
+                backup_total_skipped += 1
+
                 continue
 
-            files_to_process.append(file)
+            # ------------------------------------------------
+            # Convert raw Mongo document into an object
+            # compatible with backup_one_file()
+            # ------------------------------------------------
+
+            class BackupFile:
+                pass
+
+            file = BackupFile()
+
+            file.file_id = file_id
+
+            file.file_ref = document.get(
+                "file_ref"
+            )
+
+            file.file_name = document.get(
+                "file_name",
+                "Unknown file"
+            )
+
+            file.file_size = document.get(
+                "file_size",
+                0
+            )
+
+            file.file_type = document.get(
+                "file_type"
+            )
+
+            file.mime_type = document.get(
+                "mime_type"
+            )
+
+            file.caption = document.get(
+                "caption"
+            )
+
+            file.cover = document.get(
+                "cover"
+            )
+
+            files_to_process.append(
+                file
+            )
 
             if len(files_to_process) >= BACKUP_BATCH_SIZE:
                 break
 
-    except Exception:
+        logger.info(
+            "[BACKUP] %s: %s files waiting for backup.",
+            source_db,
+            len(files_to_process),
+        )
+
+    except Exception as e:
 
         logger.exception(
-            "[BACKUP] Error scanning %s",
-            source_db
+            "[BACKUP] ERROR scanning %s: %s",
+            source_db,
+            e,
         )
 
     return files_to_process
@@ -603,44 +729,58 @@ async def scan_model(
 
 async def get_backup_batch():
 
-    # PRIMARY
+    # ========================================================
+    # PRIMARY DATABASE
+    # ========================================================
+
     files = await scan_model(
-        Media,
-        "Media"
+        db,
+        "Media",
     )
 
     if files:
+
         return [
             ("Media", file)
             for file in files
         ]
 
-    # SECONDARY
+
+    # ========================================================
+    # SECONDARY DATABASE
+    # ========================================================
+
     files = await scan_model(
-        Media2,
-        "Media2"
+        db2,
+        "Media2",
     )
 
     if files:
+
         return [
             ("Media2", file)
             for file in files
         ]
 
-    # TERTIARY
+
+    # ========================================================
+    # TERTIARY DATABASE
+    # ========================================================
+
     files = await scan_model(
-        Media3,
-        "Media3"
+        db3,
+        "Media3",
     )
 
     if files:
+
         return [
             ("Media3", file)
             for file in files
         ]
 
-    return []
 
+    return []
 
 # ============================================================
 # BACKUP WORKER
