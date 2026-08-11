@@ -1,30 +1,9 @@
-# ============================================================
-# DOWNTOWN VILLA - EXTREME LIVE ADMIN CONTROL CENTER
-# File: plugins/admin_panel.py
-#
-# COMMAND:
-#     /admin
-#
-# ENVIRONMENT:
-#     ADMINS=123456789 987654321
-#
-# OPTIONAL:
-#     ADMIN_PANEL_UPDATE_SECONDS=3
-#     ADMIN_PANEL_LOGS=100
-#     ADMIN_PANEL_TASKS=50
-#
-# IMPORTANT:
-# This file is self-contained.
-# Replace the ENTIRE old admin_panel.py with this file.
-# ============================================================
-
 import os
 import time
 import asyncio
 import logging
 import platform
 import shutil
-import html
 from collections import deque, Counter
 from datetime import datetime
 
@@ -48,24 +27,22 @@ try:
         Media2,
         Media3,
     )
-except Exception as e:
+except Exception:
     db = None
     db2 = None
     db3 = None
+
     Media = None
     Media2 = None
     Media3 = None
 
 
 # ============================================================
-# INFO IMPORT
+# BOT CONFIG
 # ============================================================
 
 try:
-    from info import (
-        COLLECTION_NAME,
-        MULTIPLE_DB,
-    )
+    from info import COLLECTION_NAME, MULTIPLE_DB
 except Exception:
     COLLECTION_NAME = "Telegram_files"
     MULTIPLE_DB = True
@@ -79,7 +56,21 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# ADMIN CONFIG
+# DOWNTOWN VILLA
+# ULTIMATE LIVE ADMIN CONTROL CENTER
+# ============================================================
+
+
+# ============================================================
+# ADMINS
+#
+# Render Environment:
+#
+# ADMINS=123456789 987654321
+#
+# OR
+#
+# ADMINS=123456789,987654321
 # ============================================================
 
 ADMIN_IDS = {
@@ -90,34 +81,14 @@ ADMIN_IDS = {
 
 
 # ============================================================
-# PANEL CONFIG
+# SETTINGS
 # ============================================================
 
-PANEL_UPDATE_SECONDS = float(
-    os.getenv(
-        "ADMIN_PANEL_UPDATE_SECONDS",
-        "3"
-    )
-)
+PANEL_UPDATE_SECONDS = 3
 
-MAX_LIVE_LOGS = int(
-    os.getenv(
-        "ADMIN_PANEL_LOGS",
-        "100"
-    )
-)
+MAX_LIVE_LOGS = 100
 
-MAX_LIVE_TASKS = int(
-    os.getenv(
-        "ADMIN_PANEL_TASKS",
-        "50"
-    )
-)
-
-
-# ============================================================
-# BOT START TIME
-# ============================================================
+MAX_TASKS = 50
 
 START_TIME = time.time()
 
@@ -128,83 +99,64 @@ START_TIME = time.time()
 
 STATS = {
     "searches": 0,
-    "commands": 0,
     "users_seen": 0,
     "files_sent": 0,
     "files_indexed": 0,
     "files_skipped": 0,
     "errors": 0,
-    "callbacks": 0,
-    "messages": 0,
+    "commands": 0,
 }
 
 
 # ============================================================
-# USER TRACKING
+# USER DATA
 # ============================================================
 
 KNOWN_USERS = set()
-
-USER_SEARCHES = Counter()
-
-USER_COMMANDS = Counter()
-
-USER_LAST_SEEN = {}
-
-USER_NAMES = {}
-
-USER_FIRST_SEEN = {}
 
 DAILY_USERS = Counter()
 
 DAILY_SEARCHES = Counter()
 
-DAILY_COMMANDS = Counter()
+USER_SEARCHES = Counter()
+
+USER_LAST_SEEN = {}
 
 SEARCH_TERMS = Counter()
-
-COMMAND_TERMS = Counter()
-
-
-# ============================================================
-# RECENT ACTIVITY
-# ============================================================
-
-RECENT_ACTIVITY = deque(
-    maxlen=200
-)
-
-
-# ============================================================
-# ERROR BUFFER
-# ============================================================
-
-ERROR_BUFFER = deque(
-    maxlen=100
-)
 
 
 # ============================================================
 # LIVE TASKS
 #
-# Other plugins can use:
+# Example:
 #
-# from plugins.admin_panel import start_live_task
-# from plugins.admin_panel import update_live_task
-# from plugins.admin_panel import finish_live_task
+# start_live_task(
+#     "indexing",
+#     "Telegram Indexing",
+#     "INDEX",
+#     100000
+# )
 #
+# update_live_task(
+#     "indexing",
+#     current=50000,
+#     message="Processing files..."
+# )
+#
+# finish_live_task(
+#     "indexing",
+#     "COMPLETED"
+# )
 # ============================================================
 
 LIVE_TASKS = {}
 
 
 # ============================================================
-# LIVE LOGS
+# LIVE LOG BUFFER
 # ============================================================
 
-LIVE_LOGS = deque(
-    maxlen=MAX_LIVE_LOGS
-)
+LIVE_LOGS = deque(maxlen=MAX_LIVE_LOGS)
 
 
 # ============================================================
@@ -215,14 +167,17 @@ ACTIVE_PANELS = {}
 
 
 # ============================================================
-# PANEL LOCK
+# DATABASE CACHE
 # ============================================================
 
-PANEL_LOCK = asyncio.Lock()
+DB_CACHE = {
+    "time": 0,
+    "data": [],
+}
 
 
 # ============================================================
-# LIVE LOGGER HANDLER
+# LOG HANDLER
 # ============================================================
 
 class TelegramMemoryLogHandler(logging.Handler):
@@ -230,51 +185,33 @@ class TelegramMemoryLogHandler(logging.Handler):
     def emit(self, record):
 
         try:
-
-            now = datetime.now().strftime(
-                "%H:%M:%S"
-            )
+            now = datetime.now().strftime("%H:%M:%S")
 
             level = record.levelname
 
             message = record.getMessage()
 
-            if len(message) > 500:
-                message = message[:500] + "..."
+            if len(message) > 350:
+                message = message[:350] + "..."
 
-            item = {
-                "time": now,
-                "level": level,
-                "message": message,
-            }
-
-            LIVE_LOGS.append(item)
-
-            if level in (
-                "ERROR",
-                "CRITICAL",
-            ):
-                ERROR_BUFFER.append(item)
+            LIVE_LOGS.append(
+                {
+                    "time": now,
+                    "level": level,
+                    "message": message,
+                }
+            )
 
         except Exception:
             pass
 
 
-# ============================================================
-# INSTALL LOG HANDLER
-# ============================================================
-
 try:
+    memory_handler = TelegramMemoryLogHandler()
 
-    _memory_log_handler = TelegramMemoryLogHandler()
+    memory_handler.setLevel(logging.INFO)
 
-    _memory_log_handler.setLevel(
-        logging.INFO
-    )
-
-    logging.getLogger().addHandler(
-        _memory_log_handler
-    )
+    logging.getLogger().addHandler(memory_handler)
 
 except Exception:
     pass
@@ -287,12 +224,10 @@ except Exception:
 def is_admin(user_id):
 
     try:
-
-        if user_id is None:
-            return False
-
-        return int(user_id) in ADMIN_IDS
-
+        return (
+            user_id is not None
+            and int(user_id) in ADMIN_IDS
+        )
     except Exception:
         return False
 
@@ -303,14 +238,6 @@ def fmt_number(value):
         return f"{int(value):,}"
     except Exception:
         return "0"
-
-
-def fmt_float(value):
-
-    try:
-        return f"{float(value):,.1f}"
-    except Exception:
-        return "0.0"
 
 
 def fmt_bytes(value):
@@ -325,20 +252,15 @@ def fmt_bytes(value):
             "MB",
             "GB",
             "TB",
-            "PB",
         ]
 
         index = 0
 
-        while (
-            value >= 1024
-            and index < len(units) - 1
-        ):
-
+        while value >= 1024 and index < len(units) - 1:
             value /= 1024
             index += 1
 
-        return f"{value:.2f} {units[index]}"
+        return f"{value:.1f} {units[index]}"
 
     except Exception:
         return "0 B"
@@ -348,46 +270,22 @@ def fmt_duration(seconds):
 
     try:
 
-        seconds = max(
-            0,
-            int(seconds)
-        )
+        seconds = int(seconds)
 
-        days, seconds = divmod(
-            seconds,
-            86400
-        )
+        days, seconds = divmod(seconds, 86400)
 
-        hours, seconds = divmod(
-            seconds,
-            3600
-        )
+        hours, seconds = divmod(seconds, 3600)
 
-        minutes, seconds = divmod(
-            seconds,
-            60
-        )
+        minutes, seconds = divmod(seconds, 60)
 
         if days:
-            return (
-                f"{days}d "
-                f"{hours}h "
-                f"{minutes}m "
-                f"{seconds}s"
-            )
+            return f"{days}d {hours}h {minutes}m"
 
         if hours:
-            return (
-                f"{hours}h "
-                f"{minutes}m "
-                f"{seconds}s"
-            )
+            return f"{hours}h {minutes}m {seconds}s"
 
         if minutes:
-            return (
-                f"{minutes}m "
-                f"{seconds}s"
-            )
+            return f"{minutes}m {seconds}s"
 
         return f"{seconds}s"
 
@@ -395,38 +293,21 @@ def fmt_duration(seconds):
         return "0s"
 
 
-def now_string():
-
-    return datetime.now().strftime(
-        "%d-%m-%Y %H:%M:%S"
-    )
-
-
 def today_key():
 
-    return datetime.now().strftime(
-        "%Y-%m-%d"
-    )
+    return datetime.now().strftime("%Y-%m-%d")
 
 
-def safe_html(value):
+def human_today():
 
-    return html.escape(
-        str(value or "")
-    )
+    return datetime.now().strftime("%d %b %Y")
 
 
-def shorten(value, length=100):
+# ============================================================
+# VISUAL BAR
+# ============================================================
 
-    value = str(value or "")
-
-    if len(value) <= length:
-        return value
-
-    return value[:length] + "..."
-
-
-def progress_bar(
+def visual_bar(
     current,
     total,
     length=18,
@@ -435,118 +316,80 @@ def progress_bar(
     try:
 
         current = float(current)
+
         total = float(total)
 
         if total <= 0:
             percentage = 0
         else:
-            percentage = (
-                current / total
-            ) * 100
+            percentage = (current / total) * 100
 
         percentage = max(
             0,
-            min(
-                100,
-                percentage
-            )
+            min(100, percentage),
         )
 
         filled = int(
-            length
-            * percentage
-            / 100
+            length * percentage / 100
         )
 
-        empty = (
-            length
-            - filled
-        )
+        empty = length - filled
 
         return (
-            "█" * filled
-            + "░" * empty
+            "🟩" * filled
+            + "⬜" * empty
             + f" {percentage:.1f}%"
         )
 
     except Exception:
 
-        return (
-            "░" * length
-            + " 0%"
-        )
+        return "⬜" * length + " 0%"
 
 
-def status_icon(status):
-
-    status = str(
-        status or ""
-    ).upper()
-
-    if status in (
-        "ONLINE",
-        "RUNNING",
-        "ACTIVE",
-        "CONNECTED",
-    ):
-        return "🟢"
-
-    if status in (
-        "ERROR",
-        "FAILED",
-        "OFFLINE",
-    ):
-        return "🔴"
-
-    if status in (
-        "WARNING",
-        "WAITING",
-    ):
-        return "🟡"
-
-    if status in (
-        "COMPLETED",
-        "DONE",
-    ):
-        return "✅"
-
-    return "⚪"
-
-
-# ============================================================
-# ACTIVITY LOGGER
-# ============================================================
-
-def add_activity(
-    activity_type,
-    message,
-    user_id=None,
+def usage_bar(
+    percentage,
+    length=15,
 ):
 
     try:
 
-        RECENT_ACTIVITY.append(
-            {
-                "time": time.time(),
-                "type": str(activity_type),
-                "message": str(message),
-                "user_id": user_id,
-            }
+        percentage = float(percentage)
+
+        percentage = max(
+            0,
+            min(100, percentage),
+        )
+
+        filled = int(
+            length * percentage / 100
+        )
+
+        empty = length - filled
+
+        if percentage >= 90:
+            icon = "🔴"
+        elif percentage >= 70:
+            icon = "🟠"
+        else:
+            icon = "🟢"
+
+        return (
+            icon
+            + "🟦" * filled
+            + "⬜" * empty
+            + f" {percentage:.1f}%"
         )
 
     except Exception:
-        pass
+
+        return "⚪⬜" * length + " 0%"
 
 
 # ============================================================
 # USER TRACKING
 # ============================================================
 
-def track_user(
-    user_id,
-    first_name=None,
-    username=None,
-):
+def track_user(user_id):
 
     if not user_id:
         return
@@ -555,61 +398,22 @@ def track_user(
 
         user_id = int(user_id)
 
-        current_time = time.time()
-
         if user_id not in KNOWN_USERS:
 
-            KNOWN_USERS.add(
-                user_id
-            )
+            KNOWN_USERS.add(user_id)
 
-            STATS[
-                "users_seen"
-            ] = len(
-                KNOWN_USERS
-            )
+            STATS["users_seen"] = len(KNOWN_USERS)
 
-            DAILY_USERS[
-                today_key()
-            ] += 1
+            DAILY_USERS[today_key()] += 1
 
-            USER_FIRST_SEEN[
-                user_id
-            ] = current_time
-
-        USER_LAST_SEEN[
-            user_id
-        ] = current_time
-
-        if first_name or username:
-
-            name = ""
-
-            if first_name:
-                name += str(
-                    first_name
-                )
-
-            if username:
-
-                if name:
-                    name += " "
-
-                name += (
-                    "@"
-                    + str(username)
-                )
-
-            USER_NAMES[
-                user_id
-            ] = name
+        USER_LAST_SEEN[user_id] = time.time()
 
     except Exception:
         pass
 
 
 # ============================================================
-# TRACK SEARCH
+# SEARCH TRACKING
 # ============================================================
 
 def track_search(
@@ -619,193 +423,82 @@ def track_search(
 
     try:
 
-        track_user(
-            user_id
-        )
+        track_user(user_id)
 
-        STATS[
-            "searches"
-        ] += 1
+        STATS["searches"] += 1
 
-        DAILY_SEARCHES[
-            today_key()
-        ] += 1
+        DAILY_SEARCHES[today_key()] += 1
 
         if user_id:
 
-            USER_SEARCHES[
-                int(user_id)
-            ] += 1
+            USER_SEARCHES[int(user_id)] += 1
 
-        clean_query = str(
-            query or ""
-        ).strip().lower()
+        if query:
 
-        if clean_query:
+            clean = str(query).strip().lower()
 
-            SEARCH_TERMS[
-                clean_query
-            ] += 1
+            if clean:
 
-        add_activity(
-            "SEARCH",
-            clean_query or "Unknown search",
-            user_id,
-        )
+                SEARCH_TERMS[clean] += 1
 
     except Exception:
         pass
 
 
 # ============================================================
-# TRACK COMMAND
+# COMMAND TRACKING
 # ============================================================
 
-def track_command(
-    user_id,
-    command=None,
-):
+def track_command(user_id):
 
     try:
 
-        track_user(
-            user_id
-        )
+        track_user(user_id)
 
-        STATS[
-            "commands"
-        ] += 1
-
-        DAILY_COMMANDS[
-            today_key()
-        ] += 1
-
-        if user_id:
-
-            USER_COMMANDS[
-                int(user_id)
-            ] += 1
-
-        if command:
-
-            COMMAND_TERMS[
-                str(command)
-            ] += 1
-
-        add_activity(
-            "COMMAND",
-            command or "Unknown command",
-            user_id,
-        )
+        STATS["commands"] += 1
 
     except Exception:
         pass
 
 
 # ============================================================
-# TRACK FILE
+# FILE TRACKING
 # ============================================================
 
-def track_file_sent(
-    count=1
-):
+def track_file_sent(count=1):
 
     try:
-
-        STATS[
-            "files_sent"
-        ] += int(count)
-
-        add_activity(
-            "FILE",
-            f"{count} file(s) sent"
-        )
-
+        STATS["files_sent"] += int(count)
     except Exception:
         pass
 
 
-# ============================================================
-# TRACK INDEXING
-# ============================================================
-
-def track_indexed(
-    count=1
-):
+def track_indexed(count=1):
 
     try:
-
-        STATS[
-            "files_indexed"
-        ] += int(count)
-
-        add_activity(
-            "INDEX",
-            f"{count} file(s) indexed"
-        )
-
+        STATS["files_indexed"] += int(count)
     except Exception:
         pass
 
 
-# ============================================================
-# TRACK SKIPPED
-# ============================================================
-
-def track_skipped(
-    count=1
-):
+def track_skipped(count=1):
 
     try:
-
-        STATS[
-            "files_skipped"
-        ] += int(count)
-
-        add_activity(
-            "INDEX",
-            f"{count} file(s) skipped"
-        )
-
+        STATS["files_skipped"] += int(count)
     except Exception:
         pass
 
 
-# ============================================================
-# TRACK ERROR
-# ============================================================
-
-def track_error(
-    message="Unknown error"
-):
+def track_error(count=1):
 
     try:
-
-        STATS[
-            "errors"
-        ] += 1
-
-        ERROR_BUFFER.append(
-            {
-                "time": datetime.now().strftime(
-                    "%H:%M:%S"
-                ),
-                "level": "ERROR",
-                "message": str(message),
-            }
-        )
-
-        add_activity(
-            "ERROR",
-            str(message)
-        )
-
+        STATS["errors"] += int(count)
     except Exception:
         pass
 
 
 # ============================================================
-# LIVE TASK SYSTEM
+# LIVE TASK FUNCTIONS
 # ============================================================
 
 def start_live_task(
@@ -813,75 +506,33 @@ def start_live_task(
     name,
     task_type="WORK",
     total=0,
-    message="",
 ):
 
-    try:
+    task_id = str(task_id)
 
-        task_id = str(
-            task_id
+    LIVE_TASKS[task_id] = {
+        "name": str(name),
+        "type": str(task_type),
+        "current": 0,
+        "total": int(total or 0),
+        "status": "RUNNING",
+        "started": time.time(),
+        "updated": time.time(),
+        "speed": 0,
+        "message": "",
+    }
+
+    while len(LIVE_TASKS) > MAX_TASKS:
+
+        first_key = next(
+            iter(LIVE_TASKS)
         )
 
-        LIVE_TASKS[
-            task_id
-        ] = {
+        LIVE_TASKS.pop(
+            first_key,
+            None,
+        )
 
-            "id": task_id,
-
-            "name": str(
-                name
-            ),
-
-            "type": str(
-                task_type
-            ),
-
-            "current": 0,
-
-            "total": int(
-                total or 0
-            ),
-
-            "status": "RUNNING",
-
-            "started": time.time(),
-
-            "updated": time.time(),
-
-            "speed": 0,
-
-            "message": str(
-                message or ""
-            ),
-
-            "last_current": 0,
-
-            "last_time": time.time(),
-
-        }
-
-        while len(
-            LIVE_TASKS
-        ) > MAX_LIVE_TASKS:
-
-            oldest = next(
-                iter(
-                    LIVE_TASKS
-                )
-            )
-
-            LIVE_TASKS.pop(
-                oldest,
-                None
-            )
-
-    except Exception:
-        pass
-
-
-# ============================================================
-# UPDATE LIVE TASK
-# ============================================================
 
 def update_live_task(
     task_id,
@@ -889,206 +540,71 @@ def update_live_task(
     total=None,
     speed=None,
     message=None,
-    status=None,
 ):
 
-    try:
+    task = LIVE_TASKS.get(
+        str(task_id)
+    )
 
-        task = LIVE_TASKS.get(
-            str(task_id)
-        )
+    if not task:
+        return
 
-        if not task:
-            return
+    if current is not None:
+        task["current"] = int(current)
 
-        current_time = time.time()
+    if total is not None:
+        task["total"] = int(total)
 
-        if current is not None:
+    if speed is not None:
+        task["speed"] = float(speed)
 
-            current = int(
-                current
-            )
+    if message is not None:
+        task["message"] = str(message)
 
-            previous_current = task.get(
-                "current",
-                0
-            )
+    task["updated"] = time.time()
 
-            previous_time = task.get(
-                "last_time",
-                current_time
-            )
-
-            delta_items = (
-                current
-                - previous_current
-            )
-
-            delta_time = (
-                current_time
-                - previous_time
-            )
-
-            if (
-                speed is None
-                and delta_time > 0
-            ):
-
-                calculated_speed = (
-                    delta_items
-                    / delta_time
-                )
-
-                task[
-                    "speed"
-                ] = max(
-                    0,
-                    calculated_speed
-                )
-
-            task[
-                "current"
-            ] = current
-
-            task[
-                "last_current"
-            ] = current
-
-            task[
-                "last_time"
-            ] = current_time
-
-        if total is not None:
-
-            task[
-                "total"
-            ] = int(
-                total
-            )
-
-        if speed is not None:
-
-            task[
-                "speed"
-            ] = float(
-                speed
-            )
-
-        if message is not None:
-
-            task[
-                "message"
-            ] = str(
-                message
-            )
-
-        if status is not None:
-
-            task[
-                "status"
-            ] = str(
-                status
-            ).upper()
-
-        task[
-            "updated"
-        ] = current_time
-
-    except Exception:
-        pass
-
-
-# ============================================================
-# FINISH LIVE TASK
-# ============================================================
 
 def finish_live_task(
     task_id,
     status="COMPLETED",
-    message=None,
 ):
 
-    try:
+    task = LIVE_TASKS.get(
+        str(task_id)
+    )
 
-        task = LIVE_TASKS.get(
-            str(task_id)
-        )
+    if not task:
+        return
 
-        if not task:
-            return
+    task["status"] = status
 
-        task[
-            "status"
-        ] = str(
-            status
-        ).upper()
+    task["updated"] = time.time()
 
-        task[
-            "updated"
-        ] = time.time()
 
-        if message is not None:
+def remove_live_task(task_id):
 
-            task[
-                "message"
-            ] = str(
-                message
-            )
-
-    except Exception:
-        pass
+    LIVE_TASKS.pop(
+        str(task_id),
+        None,
+    )
 
 
 # ============================================================
-# REMOVE TASK
-# ============================================================
-
-def remove_live_task(
-    task_id
-):
-
-    try:
-
-        LIVE_TASKS.pop(
-            str(task_id),
-            None
-        )
-
-    except Exception:
-        pass
-
-
-# ============================================================
-# DATABASE STATS
+# DATABASE INFORMATION
 # ============================================================
 
 async def database_stats(
     database,
     model,
-    name,
 ):
 
     result = {
-
-        "name": name,
-
         "documents": 0,
-
         "size": 0,
-
-        "indexes": 0,
-
-        "status": "UNKNOWN",
-
-        "error": "",
-
+        "status": "OFFLINE",
     }
 
     if database is None:
-
-        result[
-            "status"
-        ] = "OFFLINE"
 
         return result
 
@@ -1096,113 +612,116 @@ async def database_stats(
 
         stats = await database.command(
             "collStats",
-            COLLECTION_NAME
+            COLLECTION_NAME,
         )
 
-        result[
-            "size"
-        ] = stats.get(
-            "storageSize",
+        result["documents"] = int(
+            stats.get("count", 0)
+        )
+
+        result["size"] = int(
             stats.get(
-                "size",
-                0
+                "storageSize",
+                stats.get("size", 0),
             )
         )
 
-        result[
-            "indexes"
-        ] = stats.get(
-            "nindexes",
-            0
-        )
-
-        if model is not None:
-
-            result[
-                "documents"
-            ] = await model.count_documents(
-                {}
-            )
-
-        else:
-
-            result[
-                "documents"
-            ] = stats.get(
-                "count",
-                0
-            )
-
-        result[
-            "status"
-        ] = "ONLINE"
+        result["status"] = "ONLINE"
 
     except Exception as e:
 
-        result[
-            "status"
-        ] = "ERROR"
+        result["status"] = "ERROR"
 
-        result[
-            "error"
-        ] = str(e)
+        result["error"] = str(e)
+
+        try:
+
+            if model is not None:
+
+                result["documents"] = await model.count_documents({})
+
+        except Exception:
+            pass
 
     return result
 
 
-# ============================================================
-# ALL DATABASES
-# ============================================================
-
 async def get_all_database_stats():
 
-    databases = [
+    global DB_CACHE
 
+    now = time.time()
+
+    # Don't hammer Mongo every single edit.
+    # Dashboard itself still updates every 3 seconds.
+    if now - DB_CACHE["time"] < 5:
+        return DB_CACHE["data"]
+
+    databases = [
         (
+            "PRIMARY",
             db,
             Media,
-            "PRIMARY / Media"
-        ),
-
+        )
     ]
 
     if MULTIPLE_DB:
 
         databases.extend(
             [
-
                 (
+                    "SECONDARY",
                     db2,
                     Media2,
-                    "SECONDARY / Media2"
                 ),
-
                 (
+                    "TERTIARY",
                     db3,
                     Media3,
-                    "TERTIARY / Media3"
                 ),
-
             ]
         )
 
+    tasks = [
+        database_stats(database, model)
+        for _, database, model in databases
+    ]
+
     try:
 
-        return await asyncio.gather(
-            *[
-                database_stats(
-                    database,
-                    model,
-                    name
-                )
-                for database, model, name
-                in databases
-            ]
+        results = await asyncio.gather(
+            *tasks,
+            return_exceptions=True,
         )
 
     except Exception:
 
-        return []
+        return DB_CACHE["data"]
+
+    final = []
+
+    for index, result in enumerate(results):
+
+        if isinstance(result, Exception):
+
+            result = {
+                "documents": 0,
+                "size": 0,
+                "status": "ERROR",
+                "error": str(result),
+            }
+
+        name = databases[index][0]
+
+        result["name"] = name
+
+        final.append(result)
+
+    DB_CACHE["time"] = now
+
+    DB_CACHE["data"] = final
+
+    return final
 
 
 # ============================================================
@@ -1212,15 +731,11 @@ async def get_all_database_stats():
 def system_info():
 
     try:
-
         cpu = psutil.cpu_percent(
-            interval=0.05
+            interval=None
         )
-
     except Exception:
-
         cpu = 0
-
 
     try:
 
@@ -1240,21 +755,16 @@ def system_info():
 
         ram_percent = 0
 
-
     try:
 
-        disk = shutil.disk_usage(
-            "/"
-        )
+        disk = shutil.disk_usage("/")
 
         disk_used = disk.used
 
         disk_total = disk.total
 
         disk_percent = (
-            disk.used
-            / disk.total
-            * 100
+            disk.used / disk.total * 100
             if disk.total
             else 0
         )
@@ -1267,102 +777,55 @@ def system_info():
 
         disk_percent = 0
 
-
-    try:
-
-        process = psutil.Process()
-
-        process_memory = (
-            process.memory_info().rss
-        )
-
-        process_cpu = (
-            process.cpu_percent(
-                interval=0.01
-            )
-        )
-
-    except Exception:
-
-        process_memory = 0
-
-        process_cpu = 0
-
-
     return {
-
         "cpu": cpu,
-
         "ram_used": ram_used,
-
         "ram_total": ram_total,
-
         "ram_percent": ram_percent,
-
         "disk_used": disk_used,
-
         "disk_total": disk_total,
-
         "disk_percent": disk_percent,
-
-        "process_memory": process_memory,
-
-        "process_cpu": process_cpu,
-
         "python": platform.python_version(),
-
         "platform": platform.platform(),
-
-        "machine": platform.machine(),
-
-        "processor": platform.processor(),
-
     }
 
 
 # ============================================================
-# DATABASE TOTALS
+# DATABASE VISUAL
 # ============================================================
 
-async def get_database_totals():
+def database_visual(
+    name,
+    data,
+):
 
-    databases = (
-        await get_all_database_stats()
+    documents = data.get(
+        "documents",
+        0,
     )
 
-    total_files = sum(
-        int(
-            item.get(
-                "documents",
-                0
-            )
-        )
-        for item in databases
+    size = data.get(
+        "size",
+        0,
     )
 
-    total_size = sum(
-        int(
-            item.get(
-                "size",
-                0
-            )
-        )
-        for item in databases
+    status = data.get(
+        "status",
+        "UNKNOWN",
     )
 
-    online = sum(
-        1
-        for item in databases
-        if item.get(
-            "status"
-        ) == "ONLINE"
-    )
+    if status == "ONLINE":
+        status_icon = "🟢"
+    elif status == "ERROR":
+        status_icon = "🔴"
+    else:
+        status_icon = "⚪"
 
     return (
-        databases,
-        total_files,
-        total_size,
-        online,
+        f"{status_icon} <b>{name} DATABASE</b>\n"
+        f"📦 Files: <b>{fmt_number(documents)}</b>\n"
+        f"💾 Storage: <b>{fmt_bytes(size)}</b>\n"
+        f"📡 Status: <b>{status}</b>\n"
     )
 
 
@@ -1372,47 +835,43 @@ async def get_database_totals():
 
 async def build_dashboard():
 
-    uptime = fmt_duration(
-        time.time()
-        - START_TIME
-    )
-
     system = system_info()
 
-    (
-        databases,
-        total_files,
-        total_db_size,
-        online_db,
-    ) = await get_database_totals()
+    databases = await get_all_database_stats()
+
+    total_files = sum(
+        item.get("documents", 0)
+        for item in databases
+    )
+
+    total_size = sum(
+        item.get("size", 0)
+        for item in databases
+    )
 
     today = today_key()
 
-    active_tasks = len(
-        [
-            task
-            for task in LIVE_TASKS.values()
-            if task.get(
-                "status"
-            ) == "RUNNING"
-        ]
+    uptime = fmt_duration(
+        time.time() - START_TIME
     )
 
-    text = (
+    active_tasks = len(LIVE_TASKS)
 
+    dashboard = (
         "╔══════════════════════════════╗\n"
-        "║ 🏙️ <b>DOWNTOWN VILLA</b>      ║\n"
-        "║ 👑 <b>EXTREME ADMIN CENTER</b> ║\n"
+        "║ 🏙️ <b>DOWNTOWN VILLA</b>        ║\n"
+        "║ 👑 <b>ULTIMATE ADMIN CENTER</b> ║\n"
         "╚══════════════════════════════╝\n\n"
 
         "🟢 <b>BOT STATUS: ONLINE</b>\n"
-        f"🕒 <code>{now_string()}</code>\n\n"
+        "⚡ <b>LIVE MONITORING: ACTIVE</b>\n"
+        "🔄 <b>AUTO UPDATE: 3 SECONDS</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "📊 <b>LIVE OVERVIEW</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"👥 Total Users Seen: "
+        f"👥 Total Users: "
         f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n"
 
         f"🆕 Users Today: "
@@ -1424,37 +883,73 @@ async def build_dashboard():
         f"🔍 Searches Today: "
         f"<b>{fmt_number(DAILY_SEARCHES.get(today, 0))}</b>\n"
 
-        f"📦 Total Indexed Files: "
+        f"📦 Total Files: "
         f"<b>{fmt_number(total_files)}</b>\n"
 
-        f"💾 Database Storage: "
-        f"<b>{fmt_bytes(total_db_size)}</b>\n"
-
-        f"🗄 Databases Online: "
-        f"<b>{online_db}/{len(databases)}</b>\n\n"
+        f"💾 Total Storage: "
+        f"<b>{fmt_bytes(total_size)}</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ <b>LIVE SERVER</b>\n"
+        "🖥️ <b>SERVER HEALTH</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"⚡ CPU: "
-        f"<b>{system['cpu']:.1f}%</b>\n"
+        f"⚡ CPU\n"
+        f"{usage_bar(system['cpu'])}\n\n"
 
-        f"🧠 RAM: "
-        f"<b>{system['ram_percent']:.1f}%</b> "
-        f"({fmt_bytes(system['ram_used'])})\n"
+        f"🧠 RAM\n"
+        f"{usage_bar(system['ram_percent'])}\n"
+        f"   {fmt_bytes(system['ram_used'])} / "
+        f"{fmt_bytes(system['ram_total'])}\n\n"
 
-        f"💽 Disk: "
-        f"<b>{system['disk_percent']:.1f}%</b>\n"
-
-        f"🐍 Python: "
-        f"<b>{system['python']}</b>\n"
-
-        f"⏱ Uptime: "
-        f"<b>{uptime}</b>\n\n"
+        f"💽 DISK\n"
+        f"{usage_bar(system['disk_percent'])}\n"
+        f"   {fmt_bytes(system['disk_used'])} / "
+        f"{fmt_bytes(system['disk_total'])}\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🚀 <b>CURRENT WORK</b>\n"
+        "💾 <b>DATABASE STORAGE</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    )
+
+    for data in databases:
+
+        name = data.get(
+            "name",
+            "DATABASE",
+        )
+
+        documents = data.get(
+            "documents",
+            0,
+        )
+
+        size = data.get(
+            "size",
+            0,
+        )
+
+        status = data.get(
+            "status",
+            "UNKNOWN",
+        )
+
+        if status == "ONLINE":
+            icon = "🟢"
+        elif status == "ERROR":
+            icon = "🔴"
+        else:
+            icon = "⚪"
+
+        dashboard += (
+            f"{icon} <b>{name}</b>\n"
+            f"   📦 {fmt_number(documents)} files\n"
+            f"   💾 {fmt_bytes(size)}\n"
+            f"   {visual_bar(documents, total_files or 1, 12)}\n\n"
+        )
+
+    dashboard += (
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🚀 <b>CURRENT ACTIVITY</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
         f"📥 Indexed: "
@@ -1469,184 +964,240 @@ async def build_dashboard():
         f"⚠️ Errors: "
         f"<b>{fmt_number(STATS['errors'])}</b>\n"
 
-        f"🚀 Active Tasks: "
+        f"⚙️ Commands: "
+        f"<b>{fmt_number(STATS['commands'])}</b>\n"
+
+        f"🔥 Active Tasks: "
         f"<b>{active_tasks}</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📡 <b>LIVE MODE</b>\n"
+        "⏱️ <b>RUNTIME</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"🔄 Updates every "
-        f"<b>{PANEL_UPDATE_SECONDS:.1f}s</b>\n"
-
-        "🟢 Automatic monitoring enabled\n"
-
+        f"🚀 Uptime: <b>{uptime}</b>\n"
+        f"🐍 Python: <b>{system['python']}</b>\n"
+        f"📅 Date: <b>{human_today()}</b>\n"
+        f"🕐 Updated: "
+        f"<b>{datetime.now().strftime('%H:%M:%S')}</b>\n"
     )
 
-    return text
+    return dashboard
 
 
 # ============================================================
-# STATISTICS PAGE
+# CURRENT WORK PAGE
 # ============================================================
 
-def build_statistics():
+def build_tasks_page():
 
-    today = today_key()
-
-    text = (
-
-        "📊 <b>DOWNTOWN VILLA — STATISTICS</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👥 <b>USERS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"👤 Total tracked: "
-        f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n"
-
-        f"🆕 Today: "
-        f"<b>{fmt_number(DAILY_USERS.get(today, 0))}</b>\n"
-
-        f"🔎 Searches made: "
-        f"<b>{fmt_number(STATS['searches'])}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔎 <b>SEARCH ACTIVITY</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🔍 Total searches: "
-        f"<b>{fmt_number(STATS['searches'])}</b>\n"
-
-        f"📅 Today: "
-        f"<b>{fmt_number(DAILY_SEARCHES.get(today, 0))}</b>\n"
-
-        f"⚡ Commands: "
-        f"<b>{fmt_number(STATS['commands'])}</b>\n"
-
-        f"🔘 Callback actions: "
-        f"<b>{fmt_number(STATS['callbacks'])}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📦 <b>FILE ACTIVITY</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"📥 Indexed: "
-        f"<b>{fmt_number(STATS['files_indexed'])}</b>\n"
-
-        f"⏭ Skipped: "
-        f"<b>{fmt_number(STATS['files_skipped'])}</b>\n"
-
-        f"📤 Sent: "
-        f"<b>{fmt_number(STATS['files_sent'])}</b>\n"
-
-        f"❌ Errors: "
-        f"<b>{fmt_number(STATS['errors'])}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📅 <b>TODAY</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"👥 New users: "
-        f"<b>{fmt_number(DAILY_USERS.get(today, 0))}</b>\n"
-
-        f"🔎 Searches: "
-        f"<b>{fmt_number(DAILY_SEARCHES.get(today, 0))}</b>\n"
-
-        f"⚙️ Commands: "
-        f"<b>{fmt_number(DAILY_COMMANDS.get(today, 0))}</b>\n"
-
-    )
-
-    return text
-
-
-# ============================================================
-# TOP SEARCHES
-# ============================================================
-
-def build_top_searches():
-
-    text = (
-        "🔥 <b>TOP SEARCHES</b>\n\n"
-    )
-
-    if not SEARCH_TERMS:
+    if not LIVE_TASKS:
 
         return (
-            text
-            + "💤 No searches have been tracked yet."
+            "🚀 <b>CURRENT WORK CENTER</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "💤 <b>NO ACTIVE WORK</b>\n\n"
+            "The bot is currently waiting for work."
         )
 
-    for index, (
-        term,
-        count
-    ) in enumerate(
-        SEARCH_TERMS.most_common(20),
-        start=1
+    text = (
+        "🚀 <b>CURRENT WORK CENTER</b>\n\n"
+        "🔴 LIVE TASK MONITOR\n\n"
+    )
+
+    for task_id, task in list(
+        LIVE_TASKS.items()
     ):
 
-        if index == 1:
-            icon = "🥇"
-        elif index == 2:
-            icon = "🥈"
-        elif index == 3:
-            icon = "🥉"
+        name = task.get(
+            "name",
+            task_id,
+        )
+
+        task_type = task.get(
+            "type",
+            "WORK",
+        )
+
+        current = task.get(
+            "current",
+            0,
+        )
+
+        total = task.get(
+            "total",
+            0,
+        )
+
+        speed = task.get(
+            "speed",
+            0,
+        )
+
+        status = task.get(
+            "status",
+            "UNKNOWN",
+        )
+
+        started = task.get(
+            "started",
+            time.time(),
+        )
+
+        if status == "RUNNING":
+            icon = "🟢"
+        elif status == "COMPLETED":
+            icon = "✅"
+        elif status == "FAILED":
+            icon = "🔴"
         else:
-            icon = "🔹"
+            icon = "🟡"
 
         text += (
-            f"{icon} <b>{index}.</b> "
-            f"<code>{safe_html(shorten(term, 70))}</code>\n"
-            f"   🔎 Searches: "
-            f"<b>{fmt_number(count)}</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{icon} <b>{name}</b>\n\n"
+            f"🏷 Type: <b>{task_type}</b>\n"
+        )
+
+        if total > 0:
+
+            text += (
+                f"📊 Progress\n"
+                f"{visual_bar(current, total, 16)}\n"
+                f"📦 {fmt_number(current)} / "
+                f"{fmt_number(total)}\n"
+            )
+
+        if speed > 0:
+
+            text += (
+                f"⚡ Speed: "
+                f"<b>{speed:.2f}/sec</b>\n"
+            )
+
+        text += (
+            f"⏱ Running: "
+            f"<b>{fmt_duration(time.time() - started)}</b>\n"
+        )
+
+        if task.get("message"):
+
+            text += (
+                f"💬 {task['message'][:200]}\n"
+            )
+
+        text += "\n"
+
+    return text[:4000]
+
+
+# ============================================================
+# LIVE LOG PAGE
+# ============================================================
+
+def build_logs_page():
+
+    if not LIVE_LOGS:
+
+        return (
+            "📋 <b>LIVE BOT LOGS</b>\n\n"
+            "💤 No logs captured yet."
+        )
+
+    text = (
+        "📋 <b>LIVE BOT LOGS</b>\n"
+        "🔴 Real-time memory log\n\n"
+    )
+
+    for item in list(LIVE_LOGS)[-25:]:
+
+        level = item.get(
+            "level",
+            "INFO",
+        )
+
+        if level == "ERROR":
+            icon = "🔴"
+        elif level == "WARNING":
+            icon = "🟠"
+        elif level == "DEBUG":
+            icon = "🔵"
+        else:
+            icon = "🟢"
+
+        message = item.get(
+            "message",
+            "",
+        )
+
+        message = (
+            message
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+        text += (
+            f"<code>{item.get('time', '')}</code> "
+            f"{icon} "
+            f"{message[:180]}\n"
         )
 
     return text[:4000]
 
 
 # ============================================================
-# COMMAND STATISTICS
+# SEARCH PAGE
 # ============================================================
 
-def build_command_statistics():
+def build_search_page():
+
+    today = today_key()
 
     text = (
-        "⚙️ <b>COMMAND ACTIVITY</b>\n\n"
+        "🔎 <b>SEARCH ANALYTICS</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>SEARCH ACTIVITY</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        f"🔍 Total Searches: "
+        f"<b>{fmt_number(STATS['searches'])}</b>\n"
+
+        f"📅 Today: "
+        f"<b>{fmt_number(DAILY_SEARCHES.get(today, 0))}</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔥 <b>TOP SEARCHES</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    text += (
-        f"📊 Total commands: "
-        f"<b>{fmt_number(STATS['commands'])}</b>\n\n"
-    )
+    if not SEARCH_TERMS:
 
-    if not COMMAND_TERMS:
+        text += "💤 No search terms recorded yet."
 
-        text += (
-            "💤 No command names recorded yet."
-        )
+    else:
 
-        return text
+        for index, (
+            term,
+            count,
+        ) in enumerate(
+            SEARCH_TERMS.most_common(15),
+            1,
+        ):
 
-    text += (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔥 <b>TOP COMMANDS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
+            if index == 1:
+                medal = "🥇"
+            elif index == 2:
+                medal = "🥈"
+            elif index == 3:
+                medal = "🥉"
+            else:
+                medal = "🔹"
 
-    for index, (
-        command,
-        count
-    ) in enumerate(
-        COMMAND_TERMS.most_common(20),
-        start=1
-    ):
-
-        text += (
-            f"🔹 <b>{index}.</b> "
-            f"<code>{safe_html(command)}</code> "
-            f"— <b>{fmt_number(count)}</b>\n"
-        )
+            text += (
+                f"{medal} <b>{index}.</b> "
+                f"{term[:60]} "
+                f"— <b>{fmt_number(count)}</b>\n"
+            )
 
     return text[:4000]
 
@@ -1655,41 +1206,39 @@ def build_command_statistics():
 # USERS PAGE
 # ============================================================
 
-def build_users():
+def build_users_page():
 
     text = (
+        "👥 <b>USER CONTROL CENTER</b>\n\n"
 
-        "👥 <b>DOWNTOWN VILLA — USER CENTER</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📊 <b>USER OVERVIEW</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"👤 Total tracked: "
-        f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n\n"
+        f"👤 Total Tracked: "
+        f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🆕 Today: "
+        f"<b>{fmt_number(DAILY_USERS.get(today_key(), 0))}</b>\n\n"
+
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
         "🔥 <b>MOST ACTIVE USERS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
     if not USER_SEARCHES:
 
-        text += (
-            "💤 No user search activity recorded."
-        )
+        text += "💤 No user activity recorded."
 
         return text
 
     for index, (
         user_id,
-        count
+        searches,
     ) in enumerate(
         USER_SEARCHES.most_common(15),
-        start=1
+        1,
     ):
-
-        name = USER_NAMES.get(
-            user_id,
-            "Unknown"
-        )
 
         last_seen = USER_LAST_SEEN.get(
             user_id
@@ -1697,83 +1246,23 @@ def build_users():
 
         if last_seen:
 
-            ago = fmt_duration(
-                time.time()
-                - last_seen
+            last = fmt_duration(
+                time.time() - last_seen
             )
 
-            last_text = (
-                f"{ago} ago"
-            )
+            last_text = f"{last} ago"
 
         else:
 
             last_text = "Unknown"
 
         text += (
-
-            f"👤 <b>{index}. "
-            f"{safe_html(name)}</b>\n"
-
-            f"🆔 <code>{user_id}</code>\n"
-
-            f"🔎 Searches: "
-            f"<b>{fmt_number(count)}</b>\n"
-
-            f"🕒 Last seen: "
+            f"👤 <b>{index}.</b> "
+            f"<code>{user_id}</code>\n"
+            f"   🔎 Searches: "
+            f"<b>{searches}</b>\n"
+            f"   🕐 Last seen: "
             f"<b>{last_text}</b>\n\n"
-
-        )
-
-    return text[:4000]
-
-
-# ============================================================
-# RECENT USERS
-# ============================================================
-
-def build_recent_users():
-
-    text = (
-        "🕒 <b>RECENT USER ACTIVITY</b>\n\n"
-    )
-
-    users = sorted(
-        USER_LAST_SEEN.items(),
-        key=lambda item: item[1],
-        reverse=True
-    )[:20]
-
-    if not users:
-
-        return (
-            text
-            + "💤 No users tracked yet."
-        )
-
-    for index, (
-        user_id,
-        last_seen
-    ) in enumerate(
-        users,
-        start=1
-    ):
-
-        name = USER_NAMES.get(
-            user_id,
-            "Unknown"
-        )
-
-        text += (
-
-            f"{index}. 👤 "
-            f"<b>{safe_html(name)}</b>\n"
-
-            f"   🆔 <code>{user_id}</code>\n"
-
-            f"   🕒 "
-            f"{fmt_duration(time.time() - last_seen)} ago\n\n"
-
         )
 
     return text[:4000]
@@ -1785,9 +1274,7 @@ def build_recent_users():
 
 async def build_database_page():
 
-    databases = (
-        await get_all_database_stats()
-    )
+    databases = await get_all_database_stats()
 
     text = (
         "💾 <b>DATABASE CONTROL CENTER</b>\n\n"
@@ -1797,636 +1284,131 @@ async def build_database_page():
 
     total_size = 0
 
-    for index, data in enumerate(
-        databases
-    ):
+    for data in databases:
 
-        status = data.get(
-            "status",
-            "UNKNOWN"
-        )
-
-        icon = status_icon(
-            status
+        name = data.get(
+            "name",
+            "DATABASE",
         )
 
         documents = data.get(
             "documents",
-            0
+            0,
         )
 
         size = data.get(
             "size",
-            0
+            0,
         )
 
-        indexes = data.get(
-            "indexes",
-            0
+        status = data.get(
+            "status",
+            "UNKNOWN",
         )
+
+        if status == "ONLINE":
+            icon = "🟢"
+        elif status == "ERROR":
+            icon = "🔴"
+        else:
+            icon = "⚪"
 
         text += (
-
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-            f"{icon} <b>{safe_html(data.get('name'))}</b>\n\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"{icon} <b>{name}</b>\n\n"
 
             f"📦 Documents: "
             f"<b>{fmt_number(documents)}</b>\n"
 
-            f"💽 Storage: "
+            f"💾 Storage: "
             f"<b>{fmt_bytes(size)}</b>\n"
 
-            f"🗂 Indexes: "
-            f"<b>{fmt_number(indexes)}</b>\n"
+            f"📡 Connection: "
+            f"<b>{status}</b>\n\n"
 
-            f"📡 Status: "
-            f"<b>{status}</b>\n"
-
+            f"📊 File Share\n"
+            f"{visual_bar(documents, max(1, sum("
+            f"x.get('documents', 0) for x in databases"
+            f")), 16)}\n\n"
         )
-
-        if data.get("error"):
-
-            text += (
-                f"⚠️ "
-                f"<code>{safe_html(shorten(data['error'], 180))}</code>\n"
-            )
-
-        text += "\n"
 
         total_files += documents
 
         total_size += size
 
     text += (
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🏆 <b>DATABASE TOTAL</b>\n\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📊 <b>DATABASE TOTAL</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"📦 Total files: "
+        f"📦 Total Files: "
         f"<b>{fmt_number(total_files)}</b>\n"
 
-        f"💾 Total storage: "
+        f"💾 Total Storage: "
         f"<b>{fmt_bytes(total_size)}</b>\n"
-
-    )
-
-    return text[:4000]
-
-
-# ============================================================
-# DATABASE DETAIL
-# ============================================================
-
-async def build_database_detail():
-
-    databases = (
-        await get_all_database_stats()
-    )
-
-    text = (
-        "🗄 <b>DATABASE DEEP STATUS</b>\n\n"
-    )
-
-    for data in databases:
-
-        text += (
-
-            f"{status_icon(data.get('status'))} "
-            f"<b>{safe_html(data.get('name'))}</b>\n"
-
-            f"📦 Documents: "
-            f"{fmt_number(data.get('documents', 0))}\n"
-
-            f"💾 Size: "
-            f"{fmt_bytes(data.get('size', 0))}\n"
-
-            f"🗂 Indexes: "
-            f"{fmt_number(data.get('indexes', 0))}\n"
-
-            f"📡 Status: "
-            f"{data.get('status', 'UNKNOWN')}\n\n"
-
-        )
-
-    text += (
-        "ℹ️ <i>Database information is read directly "
-        "from the connected MongoDB databases.</i>"
-    )
-
-    return text[:4000]
-
-
-# ============================================================
-# LIVE TASK PAGE
-# ============================================================
-
-def build_tasks_text():
-
-    running = [
-        task
-        for task in LIVE_TASKS.values()
-        if task.get("status") == "RUNNING"
-    ]
-
-    completed = [
-        task
-        for task in LIVE_TASKS.values()
-        if task.get("status") != "RUNNING"
-    ]
-
-    text = (
-        "🚀 <b>CURRENT WORK CENTER</b>\n\n"
-    )
-
-    if not LIVE_TASKS:
-
-        return (
-            text
-            + "💤 <b>NO ACTIVE WORK</b>\n\n"
-            "The bot currently has no task registered "
-            "with the live task system."
-        )
-
-    text += (
-        f"🟢 Running: <b>{len(running)}</b>\n"
-        f"📋 Other: <b>{len(completed)}</b>\n\n"
-    )
-
-    for task_id, task in list(
-        LIVE_TASKS.items()
-    ):
-
-        status = task.get(
-            "status",
-            "UNKNOWN"
-        )
-
-        icon = status_icon(
-            status
-        )
-
-        current = task.get(
-            "current",
-            0
-        )
-
-        total = task.get(
-            "total",
-            0
-        )
-
-        speed = task.get(
-            "speed",
-            0
-        )
-
-        started = task.get(
-            "started",
-            time.time()
-        )
-
-        text += (
-
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-            f"{icon} <b>{safe_html(task.get('name', task_id))}</b>\n"
-
-            f"🏷 Type: "
-            f"<b>{safe_html(task.get('type', 'WORK'))}</b>\n"
-
-            f"📡 Status: "
-            f"<b>{safe_html(status)}</b>\n"
-
-        )
-
-        if total:
-
-            text += (
-
-                f"📊 "
-                f"{progress_bar(current, total)}\n"
-
-                f"📦 "
-                f"{fmt_number(current)} / "
-                f"{fmt_number(total)}\n"
-
-            )
-
-        if speed:
-
-            text += (
-                f"⚡ Speed: "
-                f"<b>{speed:.2f}/sec</b>\n"
-            )
-
-        text += (
-
-            f"⏱ Runtime: "
-            f"<b>{fmt_duration(time.time() - started)}</b>\n"
-
-        )
-
-        if task.get("message"):
-
-            text += (
-
-                f"💬 "
-                f"<code>{safe_html(shorten(task['message'], 180))}</code>\n"
-
-            )
-
-        text += "\n"
-
-    return text[:4000]
-
-
-# ============================================================
-# LIVE LOGS
-# ============================================================
-
-def build_logs_text():
-
-    text = (
-        "📋 <b>LIVE BOT LOGS</b>\n\n"
-    )
-
-    if not LIVE_LOGS:
-
-        return (
-            text
-            + "💤 No logs captured yet."
-        )
-
-    logs = list(
-        LIVE_LOGS
-    )[-25:]
-
-    for item in logs:
-
-        level = item.get(
-            "level",
-            "INFO"
-        )
-
-        if level in (
-            "ERROR",
-            "CRITICAL",
-        ):
-
-            icon = "🔴"
-
-        elif level == "WARNING":
-
-            icon = "🟡"
-
-        elif level == "DEBUG":
-
-            icon = "🔵"
-
-        else:
-
-            icon = "🟢"
-
-        message = safe_html(
-            item.get(
-                "message",
-                ""
-            )
-        )
-
-        message = shorten(
-            message,
-            180
-        )
-
-        text += (
-
-            f"<code>{item.get('time', '')}</code> "
-            f"{icon} "
-            f"<b>{level}</b>\n"
-
-            f"{message}\n\n"
-
-        )
-
-    return text[:4000]
-
-
-# ============================================================
-# ERROR PAGE
-# ============================================================
-
-def build_errors():
-
-    text = (
-        "🚨 <b>ERROR CENTER</b>\n\n"
-    )
-
-    text += (
-        f"❌ Total errors: "
-        f"<b>{fmt_number(STATS['errors'])}</b>\n\n"
-    )
-
-    if not ERROR_BUFFER:
-
-        text += (
-            "🟢 <b>NO RECORDED ERRORS</b>\n"
-        )
-
-        return text
-
-    text += (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔴 <b>RECENT ERRORS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    )
-
-    for item in list(
-        ERROR_BUFFER
-    )[-15:]:
-
-        text += (
-
-            f"⏰ <code>{item.get('time', '')}</code>\n"
-
-            f"🔴 "
-            f"<code>{safe_html(shorten(item.get('message', ''), 250))}</code>\n\n"
-
-        )
-
-    return text[:4000]
-
-
-# ============================================================
-# SYSTEM PAGE
-# ============================================================
-
-def build_system():
-
-    info = system_info()
-
-    text = (
-
-        "🖥️ <b>DOWNTOWN VILLA — SYSTEM</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "⚡ <b>CPU</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"⚡ CPU usage: "
-        f"<b>{info['cpu']:.1f}%</b>\n"
-
-        f"⚙️ Process CPU: "
-        f"<b>{info['process_cpu']:.1f}%</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🧠 <b>MEMORY</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🧠 RAM usage: "
-        f"<b>{info['ram_percent']:.1f}%</b>\n"
-
-        f"📌 Used: "
-        f"<b>{fmt_bytes(info['ram_used'])}</b>\n"
-
-        f"📦 Total: "
-        f"<b>{fmt_bytes(info['ram_total'])}</b>\n"
-
-        f"🤖 Bot process RAM: "
-        f"<b>{fmt_bytes(info['process_memory'])}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "💽 <b>DISK</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"💽 Usage: "
-        f"<b>{info['disk_percent']:.1f}%</b>\n"
-
-        f"📌 Used: "
-        f"<b>{fmt_bytes(info['disk_used'])}</b>\n"
-
-        f"📦 Total: "
-        f"<b>{fmt_bytes(info['disk_total'])}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🐍 <b>RUNTIME</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🐍 Python: "
-        f"<b>{info['python']}</b>\n"
-
-        f"💻 Machine: "
-        f"<b>{safe_html(info['machine'])}</b>\n"
-
-        f"🖥 Platform: "
-        f"<code>{safe_html(shorten(info['platform'], 100))}</code>\n"
-
-        f"⏱ Uptime: "
-        f"<b>{fmt_duration(time.time() - START_TIME)}</b>\n\n"
-
-        f"👥 Memory users: "
-        f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n"
-
-        f"🚀 Live tasks: "
-        f"<b>{fmt_number(len(LIVE_TASKS))}</b>\n"
-
-    )
-
-    return text[:4000]
-
-
-# ============================================================
-# ACTIVITY PAGE
-# ============================================================
-
-def build_activity():
-
-    text = (
-        "📡 <b>LIVE ACTIVITY FEED</b>\n\n"
-    )
-
-    if not RECENT_ACTIVITY:
-
-        return (
-            text
-            + "💤 No activity recorded yet."
-        )
-
-    for item in list(
-        RECENT_ACTIVITY
-    )[-25:]:
-
-        activity_type = str(
-            item.get(
-                "type",
-                "ACTIVITY"
-            )
-        )
-
-        if activity_type == "SEARCH":
-
-            icon = "🔎"
-
-        elif activity_type == "COMMAND":
-
-            icon = "⚙️"
-
-        elif activity_type == "INDEX":
-
-            icon = "📥"
-
-        elif activity_type == "FILE":
-
-            icon = "📤"
-
-        elif activity_type == "ERROR":
-
-            icon = "🔴"
-
-        else:
-
-            icon = "📡"
-
-        age = fmt_duration(
-            time.time()
-            - item.get(
-                "time",
-                time.time()
-            )
-        )
-
-        text += (
-
-            f"{icon} <b>{safe_html(activity_type)}</b> "
-            f"<i>{age} ago</i>\n"
-
-            f"   {safe_html(shorten(item.get('message', ''), 200))}\n"
-
-        )
-
-        if item.get("user_id"):
-
-            text += (
-                f"   👤 "
-                f"<code>{item['user_id']}</code>\n"
-            )
-
-        text += "\n"
-
-    return text[:4000]
-
-
-# ============================================================
-# CONFIGURATION PAGE
-# ============================================================
-
-def build_configuration():
-
-    admins = ", ".join(
-        str(x)
-        for x in ADMIN_IDS
-    )
-
-    text = (
-
-        "⚙️ <b>ADMIN PANEL CONFIGURATION</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "👑 <b>ADMINS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"👥 Admin count: "
-        f"<b>{len(ADMIN_IDS)}</b>\n"
-
-        f"🆔 IDs: "
-        f"<code>{safe_html(admins or 'NONE')}</code>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔄 <b>LIVE MONITORING</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"⏱ Update interval: "
-        f"<b>{PANEL_UPDATE_SECONDS:.1f}s</b>\n"
-
-        f"📋 Log buffer: "
-        f"<b>{MAX_LIVE_LOGS}</b>\n"
-
-        f"🚀 Task buffer: "
-        f"<b>{MAX_LIVE_TASKS}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🗄 <b>DATABASE</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"📚 Collection: "
-        f"<code>{safe_html(COLLECTION_NAME)}</code>\n"
-
-        f"🔗 Multiple DB: "
-        f"<b>{MULTIPLE_DB}</b>\n"
-
     )
 
     return text
 
 
 # ============================================================
-# HELP / INTEGRATION PAGE
+# SYSTEM PAGE
 # ============================================================
 
-def build_help():
+def build_system_page():
+
+    system = system_info()
+
+    uptime = fmt_duration(
+        time.time() - START_TIME
+    )
 
     return (
+        "⚙️ <b>SYSTEM CONTROL CENTER</b>\n\n"
 
-        "🛠 <b>ADMIN PANEL INTEGRATION</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🖥️ <b>SERVER</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        "This panel can receive live task information "
-        "from your other plugins.\n\n"
+        f"🐍 Python: "
+        f"<b>{system['python']}</b>\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🚀 <b>START A TASK</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"💻 Platform: "
+        f"<b>{system['platform'][:100]}</b>\n\n"
 
-        "<code>start_live_task(\n"
-        "    \"indexing\",\n"
-        "    \"Channel Indexing\",\n"
-        "    \"INDEXING\",\n"
-        "    100000\n"
-        ")</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚡ <b>CPU</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📊 <b>UPDATE TASK</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{usage_bar(system['cpu'], 20)}\n\n"
 
-        "<code>update_live_task(\n"
-        "    \"indexing\",\n"
-        "    current=5000,\n"
-        "    message=\"Processing files\"\n"
-        ")</code>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🧠 <b>MEMORY</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ <b>FINISH TASK</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{usage_bar(system['ram_percent'], 20)}\n"
 
-        "<code>finish_live_task(\n"
-        "    \"indexing\",\n"
-        "    \"COMPLETED\"\n"
-        ")</code>\n\n"
+        f"Used: <b>{fmt_bytes(system['ram_used'])}</b>\n"
+        f"Total: <b>{fmt_bytes(system['ram_total'])}</b>\n\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🔎 <b>SEARCH TRACKING</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💽 <b>DISK</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        "<code>track_search(user_id, query)</code>\n\n"
+        f"{usage_bar(system['disk_percent'], 20)}\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📥 <b>INDEX TRACKING</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"Used: <b>{fmt_bytes(system['disk_used'])}</b>\n"
+        f"Total: <b>{fmt_bytes(system['disk_total'])}</b>\n\n"
 
-        "<code>track_indexed(1)\n"
-        "track_skipped(1)</code>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⏱️ <b>RUNTIME</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
+        f"🚀 Uptime: <b>{uptime}</b>\n"
+        f"⚙️ Active Tasks: <b>{len(LIVE_TASKS)}</b>\n"
+        f"👥 Tracked Users: "
+        f"<b>{fmt_number(len(KNOWN_USERS))}</b>\n"
+        f"🔎 Searches: "
+        f"<b>{fmt_number(STATS['searches'])}</b>\n"
     )
 
 
@@ -2434,185 +1416,100 @@ def build_help():
 # MAIN KEYBOARD
 # ============================================================
 
-def main_keyboard(
-    live=False
-):
-
-    live_text = (
-        "🟢 LIVE MODE ON"
-        if live
-        else "🔴 LIVE MODE OFF"
-    )
+def main_keyboard():
 
     return InlineKeyboardMarkup(
-
         [
-
             [
-
                 InlineKeyboardButton(
-                    "📊 Statistics",
-                    callback_data="dv:stats"
+                    "📊 OVERVIEW",
+                    callback_data="dv:home",
                 ),
-
                 InlineKeyboardButton(
-                    "👥 Users",
-                    callback_data="dv:users"
+                    "👥 USERS",
+                    callback_data="dv:users",
                 ),
-
             ],
 
             [
-
                 InlineKeyboardButton(
-                    "🔎 Searches",
-                    callback_data="dv:searches"
+                    "🔎 SEARCHES",
+                    callback_data="dv:searches",
                 ),
-
                 InlineKeyboardButton(
-                    "🔥 Top Searches",
-                    callback_data="dv:top"
+                    "🔥 TOP SEARCHES",
+                    callback_data="dv:top",
                 ),
-
             ],
 
             [
-
                 InlineKeyboardButton(
-                    "💾 Database",
-                    callback_data="dv:database"
+                    "💾 DATABASE",
+                    callback_data="dv:database",
                 ),
-
                 InlineKeyboardButton(
-                    "🗄 DB Deep",
-                    callback_data="dv:dbdeep"
+                    "🚀 CURRENT WORK",
+                    callback_data="dv:tasks",
                 ),
-
             ],
 
             [
-
                 InlineKeyboardButton(
-                    "🚀 Current Work",
-                    callback_data="dv:tasks"
+                    "📋 LIVE LOGS",
+                    callback_data="dv:logs",
                 ),
-
                 InlineKeyboardButton(
-                    "📡 Activity",
-                    callback_data="dv:activity"
+                    "⚙️ SYSTEM",
+                    callback_data="dv:system",
                 ),
-
             ],
 
             [
-
                 InlineKeyboardButton(
-                    "📋 Live Logs",
-                    callback_data="dv:logs"
+                    "🔴 LIVE MODE",
+                    callback_data="dv:live",
                 ),
-
-                InlineKeyboardButton(
-                    "🚨 Errors",
-                    callback_data="dv:errors"
-                ),
-
             ],
 
             [
-
                 InlineKeyboardButton(
-                    "🖥 System",
-                    callback_data="dv:system"
+                    "🔄 REFRESH NOW",
+                    callback_data="dv:refresh",
                 ),
-
-                InlineKeyboardButton(
-                    "⚙️ Commands",
-                    callback_data="dv:commands"
-                ),
-
             ],
-
-            [
-
-                InlineKeyboardButton(
-                    "👤 Recent Users",
-                    callback_data="dv:recentusers"
-                ),
-
-                InlineKeyboardButton(
-                    "🔧 Configuration",
-                    callback_data="dv:config"
-                ),
-
-            ],
-
-            [
-
-                InlineKeyboardButton(
-                    live_text,
-                    callback_data="dv:togglelive"
-                ),
-
-                InlineKeyboardButton(
-                    "🛠 Help",
-                    callback_data="dv:help"
-                ),
-
-            ],
-
-            [
-
-                InlineKeyboardButton(
-                    "🔄 DASHBOARD",
-                    callback_data="dv:home"
-                ),
-
-            ],
-
         ]
-
     )
 
 
 # ============================================================
-# BACK KEYBOARD
+# BACK BUTTON
 # ============================================================
 
 def back_keyboard():
 
     return InlineKeyboardMarkup(
-
         [
-
             [
-
                 InlineKeyboardButton(
-                    "⬅️ Dashboard",
-                    callback_data="dv:home"
+                    "⬅️ DASHBOARD",
+                    callback_data="dv:home",
                 ),
-
                 InlineKeyboardButton(
-                    "🔄 Update",
-                    callback_data="dv:refresh"
+                    "🔄 UPDATE",
+                    callback_data="dv:refresh",
                 ),
-
             ]
-
         ]
-
     )
 
 
 # ============================================================
-# /ADMIN COMMAND
+# ADMIN COMMAND
 # ============================================================
 
 @Client.on_message(
     filters.command(
-        [
-            "admin",
-            "adm",
-        ]
+        ["admin", "adm"]
     )
 )
 async def admin_command(
@@ -2620,64 +1517,45 @@ async def admin_command(
     message,
 ):
 
-    user = message.from_user
-
     user_id = (
-        user.id
-        if user
+        message.from_user.id
+        if message.from_user
         else None
     )
 
-    if not is_admin(
-        user_id
-    ):
+    if not is_admin(user_id):
 
         return
 
-    track_command(
-        user_id,
-        "/admin"
-    )
+    track_command(user_id)
 
     text = await build_dashboard()
 
     sent = await message.reply_text(
-
         text,
-
-        reply_markup=main_keyboard(
-            live=False
-        ),
-
+        reply_markup=main_keyboard(),
         parse_mode=enums.ParseMode.HTML,
-
-        disable_web_page_preview=True,
-
     )
 
-    ACTIVE_PANELS[
-        user_id
-    ] = {
-
+    ACTIVE_PANELS[user_id] = {
         "chat_id": message.chat.id,
-
         "message_id": sent.id,
-
         "mode": "home",
-
-        "live": False,
-
+        "live": True,
     }
+
+    # Start the live updater only when
+    # an admin actually opens the panel.
+
+    ensure_live_loop(client)
 
 
 # ============================================================
-# CALLBACK ROUTER
+# CALLBACK HANDLER
 # ============================================================
 
 @Client.on_callback_query(
-    filters.regex(
-        r"^dv:"
-    )
+    filters.regex(r"^dv:")
 )
 async def admin_callback(
     client,
@@ -2690,775 +1568,206 @@ async def admin_callback(
         else None
     )
 
-    if not is_admin(
-        user_id
-    ):
+    if not is_admin(user_id):
 
         await query.answer(
             "⛔ Admin access only.",
-            show_alert=True
+            show_alert=True,
         )
 
         return
 
-    STATS[
-        "callbacks"
-    ] += 1
+    await query.answer()
 
-    action = query.data[
-        3:
-    ]
+    action = query.data[3:]
 
     try:
 
-        await query.answer()
+        ensure_live_loop(client)
+
+        if action in (
+            "home",
+            "refresh",
+            "live",
+        ):
+
+            text = await build_dashboard()
+
+            await query.message.edit_text(
+                text,
+                reply_markup=main_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id] = {
+                "chat_id": query.message.chat.id,
+                "message_id": query.message.id,
+                "mode": "home",
+                "live": True,
+            }
+
+            return
+
+        if action == "stats":
+
+            text = await build_dashboard()
+
+            await query.message.edit_text(
+                text,
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "stats"
+
+            return
+
+        if action == "users":
+
+            await query.message.edit_text(
+                build_users_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "users"
+
+            return
+
+        if action == "searches":
+
+            await query.message.edit_text(
+                build_search_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "searches"
+
+            return
+
+        if action == "top":
+
+            await query.message.edit_text(
+                build_search_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "top"
+
+            return
+
+        if action == "database":
+
+            await query.message.edit_text(
+                await build_database_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "database"
+
+            return
+
+        if action == "tasks":
+
+            await query.message.edit_text(
+                build_tasks_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "tasks"
+
+            return
+
+        if action == "logs":
+
+            await query.message.edit_text(
+                build_logs_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "logs"
+
+            return
+
+        if action == "system":
+
+            await query.message.edit_text(
+                build_system_page(),
+                reply_markup=back_keyboard(),
+                parse_mode=enums.ParseMode.HTML,
+            )
+
+            ACTIVE_PANELS[user_id]["mode"] = "system"
+
+            return
+
+    except FloodWait as e:
+
+        await asyncio.sleep(
+            int(
+                getattr(
+                    e,
+                    "value",
+                    5,
+                )
+            )
+        )
+
+    except RPCError:
+
+        logger.exception(
+            "[DOWNTOWN VILLA ADMIN] Telegram error"
+        )
 
     except Exception:
-        pass
 
-
-    # ========================================================
-    # HOME
-    # ========================================================
-
-    if action in (
-        "home",
-        "refresh",
-    ):
-
-        panel = ACTIVE_PANELS.get(
-            user_id,
-            {}
+        logger.exception(
+            "[DOWNTOWN VILLA ADMIN] Callback error"
         )
-
-        live = panel.get(
-            "live",
-            False
-        )
-
-        text = await build_dashboard()
-
-        try:
-
-            await query.message.edit_text(
-
-                text,
-
-                reply_markup=main_keyboard(
-                    live=live
-                ),
-
-                parse_mode=enums.ParseMode.HTML,
-
-                disable_web_page_preview=True,
-
-            )
-
-        except Exception:
-            pass
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "home",
-
-            "live": live,
-
-        }
-
-        return
-
-
-    # ========================================================
-    # TOGGLE LIVE
-    # ========================================================
-
-    if action == "togglelive":
-
-        panel = ACTIVE_PANELS.get(
-            user_id,
-            {}
-        )
-
-        live = not panel.get(
-            "live",
-            False
-        )
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "home",
-
-            "live": live,
-
-        }
-
-        text = await build_dashboard()
-
-        try:
-
-            await query.message.edit_text(
-
-                text,
-
-                reply_markup=main_keyboard(
-                    live=live
-                ),
-
-                parse_mode=enums.ParseMode.HTML,
-
-                disable_web_page_preview=True,
-
-            )
-
-        except Exception:
-            pass
-
-        try:
-
-            await query.answer(
-                "🟢 Live monitoring enabled."
-                if live
-                else
-                "🔴 Live monitoring disabled."
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # STATISTICS
-    # ========================================================
-
-    if action == "stats":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "stats",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_statistics(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # USERS
-    # ========================================================
-
-    if action == "users":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "users",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_users(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # RECENT USERS
-    # ========================================================
-
-    if action == "recentusers":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "recentusers",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_recent_users(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # SEARCHES
-    # ========================================================
-
-    if action == "searches":
-
-        text = (
-
-            "🔎 <b>SEARCH CENTER</b>\n\n"
-
-            f"🔍 Total searches: "
-            f"<b>{fmt_number(STATS['searches'])}</b>\n"
-
-            f"📅 Today: "
-            f"<b>{fmt_number(DAILY_SEARCHES.get(today_key(), 0))}</b>\n\n"
-
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-
-            "🔥 <b>Top search terms</b>\n\n"
-
-        )
-
-        if SEARCH_TERMS:
-
-            for index, (
-                term,
-                count
-            ) in enumerate(
-                SEARCH_TERMS.most_common(10),
-                start=1
-            ):
-
-                text += (
-
-                    f"{index}. "
-                    f"<code>{safe_html(shorten(term, 60))}</code> "
-                    f"— <b>{count}</b>\n"
-
-                )
-
-        else:
-
-            text += (
-                "💤 No searches tracked yet."
-            )
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "searches",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                text[:4000],
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # TOP SEARCHES
-    # ========================================================
-
-    if action == "top":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "top",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_top_searches(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # COMMANDS
-    # ========================================================
-
-    if action == "commands":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "commands",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_command_statistics(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # DATABASE
-    # ========================================================
-
-    if action == "database":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "database",
-
-            "live": True,
-
-        }
-
-        text = await build_database_page()
-
-        try:
-
-            await query.message.edit_text(
-
-                text,
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # DATABASE DEEP
-    # ========================================================
-
-    if action == "dbdeep":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "dbdeep",
-
-            "live": True,
-
-        }
-
-        text = await build_database_detail()
-
-        try:
-
-            await query.message.edit_text(
-
-                text,
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # CURRENT WORK
-    # ========================================================
-
-    if action == "tasks":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "tasks",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_tasks_text(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # LOGS
-    # ========================================================
-
-    if action == "logs":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "logs",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_logs_text(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # ERRORS
-    # ========================================================
-
-    if action == "errors":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "errors",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_errors(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # SYSTEM
-    # ========================================================
-
-    if action == "system":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "system",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_system(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # ACTIVITY
-    # ========================================================
-
-    if action == "activity":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "activity",
-
-            "live": True,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_activity(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # CONFIG
-    # ========================================================
-
-    if action == "config":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "config",
-
-            "live": False,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_configuration(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
-
-
-    # ========================================================
-    # HELP
-    # ========================================================
-
-    if action == "help":
-
-        ACTIVE_PANELS[
-            user_id
-        ] = {
-
-            "chat_id": query.message.chat.id,
-
-            "message_id": query.message.id,
-
-            "mode": "help",
-
-            "live": False,
-
-        }
-
-        try:
-
-            await query.message.edit_text(
-
-                build_help(),
-
-                reply_markup=back_keyboard(),
-
-                parse_mode=enums.ParseMode.HTML,
-
-            )
-
-        except Exception:
-            pass
-
-        return
 
 
 # ============================================================
-# LIVE PANEL UPDATE LOOP
+# LIVE PANEL UPDATER
 # ============================================================
 
-async def live_panel_loop():
+_live_task = None
+
+
+def ensure_live_loop(client):
+
+    global _live_task
+
+    if _live_task is not None:
+
+        if not _live_task.done():
+
+            return
+
+    try:
+
+        _live_task = asyncio.create_task(
+            live_dashboard_loop(client)
+        )
+
+        logger.info(
+            "[DOWNTOWN VILLA ADMIN] "
+            "Live dashboard updater started."
+        )
+
+    except Exception:
+
+        logger.exception(
+            "[DOWNTOWN VILLA ADMIN] "
+            "Unable to start live updater."
+        )
+
+
+async def live_dashboard_loop(client):
 
     while True:
 
@@ -3472,120 +1781,58 @@ async def live_panel_loop():
 
                 continue
 
-            client = _admin_client
-
-            if client is None:
-
-                continue
-
             for user_id, panel in list(
                 ACTIVE_PANELS.items()
             ):
 
+                if not is_admin(user_id):
+
+                    continue
+
+                if not panel.get(
+                    "live",
+                    True,
+                ):
+
+                    continue
+
+                chat_id = panel.get(
+                    "chat_id"
+                )
+
+                message_id = panel.get(
+                    "message_id"
+                )
+
+                mode = panel.get(
+                    "mode",
+                    "home",
+                )
+
+                if not chat_id or not message_id:
+
+                    continue
+
                 try:
-
-                    if not panel.get(
-                        "live",
-                        False
-                    ):
-                        continue
-
-                    if not is_admin(
-                        user_id
-                    ):
-                        continue
-
-                    chat_id = panel.get(
-                        "chat_id"
-                    )
-
-                    message_id = panel.get(
-                        "message_id"
-                    )
-
-                    mode = panel.get(
-                        "mode",
-                        "home"
-                    )
-
-                    if not chat_id or not message_id:
-                        continue
-
-
-                    # ==========================================
-                    # BUILD CORRECT LIVE PAGE
-                    # ==========================================
 
                     if mode == "home":
 
                         text = await build_dashboard()
 
-                        keyboard = main_keyboard(
-                            live=True
-                        )
-
-                    elif mode == "stats":
-
-                        text = build_statistics()
-
-                        keyboard = back_keyboard()
+                        keyboard = main_keyboard()
 
                     elif mode == "users":
 
-                        text = build_users()
+                        text = build_users_page()
 
                         keyboard = back_keyboard()
 
-                    elif mode == "recentusers":
+                    elif mode in (
+                        "searches",
+                        "top",
+                    ):
 
-                        text = build_recent_users()
-
-                        keyboard = back_keyboard()
-
-                    elif mode == "searches":
-
-                        text = (
-
-                            "🔎 <b>SEARCH CENTER</b>\n\n"
-
-                            f"🔍 Total: "
-                            f"<b>{fmt_number(STATS['searches'])}</b>\n"
-
-                            f"📅 Today: "
-                            f"<b>{fmt_number(DAILY_SEARCHES.get(today_key(), 0))}</b>\n\n"
-
-                            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                            "🔥 <b>LIVE TOP SEARCHES</b>\n\n"
-
-                        )
-
-                        for index, (
-                            term,
-                            count
-                        ) in enumerate(
-                            SEARCH_TERMS.most_common(15),
-                            start=1
-                        ):
-
-                            text += (
-
-                                f"{index}. "
-                                f"<code>{safe_html(shorten(term, 60))}</code> "
-                                f"— <b>{count}</b>\n"
-
-                            )
-
-                        keyboard = back_keyboard()
-
-                    elif mode == "top":
-
-                        text = build_top_searches()
-
-                        keyboard = back_keyboard()
-
-                    elif mode == "commands":
-
-                        text = build_command_statistics()
+                        text = build_search_page()
 
                         keyboard = back_keyboard()
 
@@ -3595,92 +1842,70 @@ async def live_panel_loop():
 
                         keyboard = back_keyboard()
 
-                    elif mode == "dbdeep":
-
-                        text = await build_database_detail()
-
-                        keyboard = back_keyboard()
-
                     elif mode == "tasks":
 
-                        text = build_tasks_text()
+                        text = build_tasks_page()
 
                         keyboard = back_keyboard()
 
                     elif mode == "logs":
 
-                        text = build_logs_text()
-
-                        keyboard = back_keyboard()
-
-                    elif mode == "errors":
-
-                        text = build_errors()
+                        text = build_logs_page()
 
                         keyboard = back_keyboard()
 
                     elif mode == "system":
 
-                        text = build_system()
-
-                        keyboard = back_keyboard()
-
-                    elif mode == "activity":
-
-                        text = build_activity()
+                        text = build_system_page()
 
                         keyboard = back_keyboard()
 
                     else:
 
-                        continue
+                        text = await build_dashboard()
 
+                        keyboard = main_keyboard()
 
-                    # ==========================================
-                    # TELEGRAM EDIT
-                    # ==========================================
+                    await client.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=text,
+                        reply_markup=keyboard,
+                        parse_mode=enums.ParseMode.HTML,
+                    )
 
-                    try:
+                except FloodWait as e:
 
-                        await client.edit_message_text(
-
-                            chat_id=chat_id,
-
-                            message_id=message_id,
-
-                            text=text[:4000],
-
-                            reply_markup=keyboard,
-
-                            parse_mode=enums.ParseMode.HTML,
-
-                            disable_web_page_preview=True,
-
-                        )
-
-                    except FloodWait as e:
-
-                        await asyncio.sleep(
-                            int(
-                                getattr(
-                                    e,
-                                    "value",
-                                    5
-                                )
+                    await asyncio.sleep(
+                        int(
+                            getattr(
+                                e,
+                                "value",
+                                5,
                             )
                         )
+                    )
 
-                    except RPCError:
+                except Exception as e:
 
-                        pass
+                    # Message may have been deleted.
+                    # Remove stale panel.
 
-                    except Exception:
+                    error_text = str(e).lower()
 
-                        pass
+                    if (
+                        "message to edit not found"
+                        in error_text
+                        or "message not modified"
+                        in error_text
+                        or "message_id_invalid"
+                        in error_text
+                    ):
 
-                except Exception:
-
-                    continue
+                        ACTIVE_PANELS.pop(
+                            user_id,
+                            None,
+                        )
 
         except asyncio.CancelledError:
 
@@ -3690,162 +1915,14 @@ async def live_panel_loop():
 
             logger.exception(
                 "[DOWNTOWN VILLA ADMIN] "
-                "Live panel loop error"
+                "Live loop crashed."
             )
 
-
-# ============================================================
-# GLOBAL CLIENT
-# ============================================================
-
-_admin_client = None
-
-_live_panel_task = None
+            await asyncio.sleep(5)
 
 
 # ============================================================
-# INITIALIZATION
-# ============================================================
-
-def initialize_admin_panel(
-    client
-):
-
-    global _admin_client
-    global _live_panel_task
-
-    _admin_client = client
-
-    if _live_panel_task is None:
-
-        try:
-
-            _live_panel_task = asyncio.create_task(
-                live_panel_loop()
-            )
-
-            logger.info(
-                "[DOWNTOWN VILLA ADMIN] "
-                "Extreme live admin panel started."
-            )
-
-        except Exception:
-
-            logger.exception(
-                "[DOWNTOWN VILLA ADMIN] "
-                "Could not start live panel."
-            )
-
-
-# ============================================================
-# AUTO INITIALIZATION
-#
-# The first /admin call also initializes the panel.
-# ============================================================
-
-_original_admin_command = admin_command
-
-
-# ============================================================
-# PATCHED ADMIN COMMAND
-# ============================================================
-
-@Client.on_message(
-    filters.command(
-        "adminpanel_init"
-    )
-)
-async def adminpanel_init(
-    client,
-    message,
-):
-
-    global _admin_client
-
-    _admin_client = client
-
-    initialize_admin_panel(
-        client
-    )
-
-    return
-
-
-# ============================================================
-# SECOND INITIALIZER
-#
-# This is harmless and only initializes when the command
-# below is used. The real panel still works from /admin.
-# ============================================================
-
-@Client.on_message(
-    filters.command(
-        "dvadmininit"
-    )
-)
-async def dvadmininit(
-    client,
-    message,
-):
-
-    user_id = (
-        message.from_user.id
-        if message.from_user
-        else None
-    )
-
-    if not is_admin(
-        user_id
-    ):
-        return
-
-    initialize_admin_panel(
-        client
-    )
-
-    await message.reply_text(
-        "🟢 <b>Downtown Villa Admin Monitor Initialized.</b>",
-        parse_mode=enums.ParseMode.HTML
-    )
-
-
-# ============================================================
-# IMPORTANT:
-# Automatically initialize when /admin is opened.
-# ============================================================
-
-@Client.on_message(
-    filters.command(
-        "admin"
-    )
-)
-async def admin_auto_initializer(
-    client,
-    message,
-):
-
-    global _admin_client
-
-    user_id = (
-        message.from_user.id
-        if message.from_user
-        else None
-    )
-
-    if not is_admin(
-        user_id
-    ):
-        return
-
-    _admin_client = client
-
-    initialize_admin_panel(
-        client
-    )
-
-
-# ============================================================
-# STARTUP LOGGING
+# ADMIN PANEL STARTUP LOG
 # ============================================================
 
 logger.info(
@@ -3854,24 +1931,18 @@ logger.info(
 
 logger.info(
     "[DOWNTOWN VILLA ADMIN] "
-    "EXTREME ADMIN CONTROL CENTER LOADED"
+    "Ultimate Admin Panel Loaded"
 )
 
 logger.info(
     "[DOWNTOWN VILLA ADMIN] "
     "Admins configured: %s",
-    len(ADMIN_IDS)
+    len(ADMIN_IDS),
 )
 
 logger.info(
     "[DOWNTOWN VILLA ADMIN] "
-    "Live update interval: %.1fs",
-    PANEL_UPDATE_SECONDS
-)
-
-logger.info(
-    "[DOWNTOWN VILLA ADMIN] "
-    "Live logs: ENABLED"
+    "Live updates: 3 seconds"
 )
 
 logger.info(
@@ -3881,7 +1952,12 @@ logger.info(
 
 logger.info(
     "[DOWNTOWN VILLA ADMIN] "
-    "Live task monitoring: ENABLED"
+    "Live logs: ENABLED"
+)
+
+logger.info(
+    "[DOWNTOWN VILLA ADMIN] "
+    "Current work monitor: ENABLED"
 )
 
 logger.info(
