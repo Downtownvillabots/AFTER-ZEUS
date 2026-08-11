@@ -150,7 +150,7 @@ PANEL_LOCK = asyncio.Lock()
 
 class TelegramMemoryLogHandler(logging.Handler):
 
-```
+
 def emit(self, record):
 
     try:
@@ -180,11 +180,11 @@ def emit(self, record):
 
     except Exception:
         pass
-```
+
 
 try:
 
-```
+
 _memory_handler = TelegramMemoryLogHandler()
 
 _memory_handler.setLevel(
@@ -194,7 +194,7 @@ _memory_handler.setLevel(
 logging.getLogger().addHandler(
     _memory_handler
 )
-```
+
 
 except Exception:
 pass
@@ -207,25 +207,25 @@ pass
 
 def is_admin(user_id):
 
-```
+
 return (
     user_id is not None
     and int(user_id) in ADMIN_IDS
 )
-```
+
 
 def fmt_number(value):
 
-```
+
 try:
     return f"{int(value):,}"
 except Exception:
     return "0"
-```
+
 
 def fmt_bytes(value):
 
-```
+
 try:
 
     value = float(value)
@@ -257,11 +257,11 @@ try:
 except Exception:
 
     return "0 B"
-```
+
 
 def fmt_duration(seconds):
 
-```
+
 try:
 
     seconds = int(seconds)
@@ -309,7 +309,6 @@ try:
 except Exception:
 
     return "0s"
-```
 
 def progress_bar(
 current,
@@ -317,7 +316,7 @@ total,
 length=16,
 ):
 
-```
+
 try:
 
     current = float(current)
@@ -358,23 +357,23 @@ except Exception:
         "░" * length
         + " 0%"
     )
-```
+#
 
 def today_key():
 
-```
+#
 return datetime.now().strftime(
     "%Y-%m-%d"
 )
-```
+#
 
 def human_today():
 
-```
+#
 return datetime.now().strftime(
     "%d %b %Y"
 )
-```
+#
 
 # ============================================================
 
@@ -406,7 +405,7 @@ def track_user(
 user_id,
 ):
 
-```
+#
 if not user_id:
     return
 
@@ -438,14 +437,14 @@ try:
 
 except Exception:
     pass
-```
+#
 
 def track_search(
 user_id,
 query="",
 ):
 
-```
+#
 try:
 
     track_user(
@@ -484,13 +483,13 @@ try:
 
 except Exception:
     pass
-```
+#
 
 def track_command(
 user_id,
 ):
 
-```
+#
 try:
 
     track_user(
@@ -503,21 +502,21 @@ try:
 
 except Exception:
     pass
-```
+#
 
 def track_file_sent():
 
-```
+#
 STATS[
     "files_sent"
 ] += 1
-```
+#
 
 def track_indexed(
 count=1,
 ):
 
-```
+#
 try:
 
     STATS[
@@ -526,13 +525,13 @@ try:
 
 except Exception:
     pass
-```
+#
 
 def track_skipped(
 count=1,
 ):
 
-```
+#
 try:
 
     STATS[
@@ -541,15 +540,15 @@ try:
 
 except Exception:
     pass
-```
+#
 
 def track_error():
 
-```
+#
 STATS[
     "errors"
 ] += 1
-```
+#
 
 # ============================================================
 
@@ -564,7 +563,7 @@ task_type="WORK",
 total=0,
 ):
 
-```
+#
 LIVE_TASKS[
     str(task_id)
 ] = {
@@ -591,7 +590,7 @@ while len(
         ),
         None,
     )
-```
+#
 
 def update_live_task(
 task_id,
@@ -601,7 +600,7 @@ speed=None,
 message=None,
 ):
 
-```
+#
 task = LIVE_TASKS.get(
     str(task_id)
 )
@@ -636,14 +635,14 @@ if message is not None:
 task[
     "updated"
 ] = time.time()
-```
+#
 
 def finish_live_task(
 task_id,
 status="COMPLETED",
 ):
 
-```
+#
 task = LIVE_TASKS.get(
     str(task_id)
 )
@@ -658,18 +657,18 @@ task[
 task[
     "updated"
 ] = time.time()
-```
+#
 
 def remove_live_task(
 task_id,
 ):
 
-```
+#
 LIVE_TASKS.pop(
     str(task_id),
     None,
 )
-```
+#
 
 # ============================================================
 
@@ -682,7 +681,7 @@ database,
 model,
 ):
 
-```
+#
 result = {
     "documents": 0,
     "size": 0,
@@ -750,11 +749,11 @@ except Exception as e:
     ] = str(e)
 
 return result
-```
+#
 
 async def get_all_database_stats():
 
-```
+#
 tasks = [
     database_stats(
         db,
@@ -786,7 +785,7 @@ try:
 except Exception:
 
     return []
-```
+#
 
 # ============================================================
 
@@ -796,7 +795,7 @@ except Exception:
 
 def system_info():
 
-```
+#
 try:
 
     cpu = psutil.cpu_percent(
@@ -854,7 +853,7 @@ return {
     "python": platform.python_version(),
     "platform": platform.platform(),
 }
-```
+#
 
 # ============================================================
 
@@ -864,7 +863,7 @@ return {
 
 def build_tasks_text():
 
-```
+#
 if not LIVE_TASKS:
 
     return (
@@ -953,7 +952,7 @@ for task_id, task in list(
     )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -963,7 +962,7 @@ return text
 
 def build_logs_text():
 
-```
+#
 if not LIVE_LOGS:
 
     return (
@@ -1014,7 +1013,7 @@ for item in logs:
     )
 
 return text[-3900:]
-```
+#
 
 # ============================================================
 
@@ -1024,7 +1023,7 @@ return text[-3900:]
 
 async def build_dashboard():
 
-```
+#
 uptime = fmt_duration(
     time.time()
     - START_TIME
@@ -1135,7 +1134,7 @@ text = (
 )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1145,7 +1144,7 @@ return text
 
 def build_statistics():
 
-```
+#
 today = today_key()
 
 text = (
@@ -1192,7 +1191,7 @@ text = (
 )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1202,7 +1201,7 @@ return text
 
 def build_top_searches():
 
-```
+#
 text = (
     "🔥 <b>TOP SEARCHES</b>\n\n"
 )
@@ -1246,7 +1245,7 @@ for index, (
     )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1256,7 +1255,7 @@ return text
 
 def build_users():
 
-```
+#
 text = (
     "👥 <b>USER ACTIVITY</b>\n\n"
 
@@ -1313,7 +1312,7 @@ for index, (
     )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1323,7 +1322,7 @@ return text
 
 async def build_database_page():
 
-```
+#
 databases = (
     await get_all_database_stats()
 )
@@ -1410,7 +1409,7 @@ text += (
 )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1420,7 +1419,7 @@ return text
 
 def build_system():
 
-```
+#
 info = system_info()
 
 text = (
@@ -1476,7 +1475,7 @@ text = (
 )
 
 return text
-```
+#
 
 # ============================================================
 
@@ -1486,7 +1485,7 @@ return text
 
 def main_keyboard():
 
-```
+#
 return InlineKeyboardMarkup(
     [
         [
@@ -1537,11 +1536,11 @@ return InlineKeyboardMarkup(
         ],
     ]
 )
-```
+#
 
 def back_keyboard():
 
-```
+#
 return InlineKeyboardMarkup(
     [
         [
@@ -1556,7 +1555,7 @@ return InlineKeyboardMarkup(
         ]
     ]
 )
-```
+#
 
 # ============================================================
 
@@ -1577,7 +1576,7 @@ client,
 message,
 ):
 
-```
+#
 if not is_admin(
     message.from_user.id
     if message.from_user
@@ -1606,7 +1605,7 @@ ACTIVE_PANELS[
     "mode": "home",
     "live": False,
 }
-```
+#
 
 # ============================================================
 
@@ -1624,7 +1623,7 @@ client,
 query,
 ):
 
-```
+#
 user_id = (
     query.from_user.id
     if query.from_user
@@ -1789,7 +1788,7 @@ except Exception:
     logger.exception(
         "[ADMIN PANEL] Callback error"
     )
-```
+#
 
 # ============================================================
 
@@ -1799,7 +1798,7 @@ except Exception:
 
 async def live_dashboard_loop():
 
-```
+#
 while True:
 
     try:
@@ -1883,7 +1882,7 @@ while True:
         logger.exception(
             "[ADMIN PANEL] Live loop error"
         )
-```
+#
 
 _admin_client = None
 _live_task = None
@@ -1904,15 +1903,15 @@ client,
 message,
 ):
 
-```
+#
 return
-```
+#
 
 def initialize_admin_panel(
 client,
 ):
 
-```
+#
 global _admin_client
 global _live_task
 
@@ -1937,7 +1936,7 @@ if _live_task is None:
             "[DOWNTOWN VILLA ADMIN] "
             "Failed to start live dashboard."
         )
-```
+#
 
 # ============================================================
 
@@ -1955,9 +1954,9 @@ client,
 message,
 ):
 
-```
+#
 return
-```
+#
 
 logger.info(
 "=================================================="
