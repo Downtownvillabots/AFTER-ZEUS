@@ -122,6 +122,47 @@ except Exception:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# ── SEPARATE MongoDB SHARDS for backup state (keeps Media DBs clean) ──
+try:
+    from motor.motor_asyncio import AsyncIOMotorClient as _BackupMongoClient
+
+    _BACKUP_DBNAME = os.getenv("BACKUP_MONGO_DB", "downtown_backup")
+    _BACKUP_URIS = []
+
+    # Multi-shard envs
+    for i in range(1, 11):
+        uri = os.getenv(f"BACKUP_MONGO_URI_{i}", "").strip()
+        if uri:
+            _BACKUP_URIS.append(uri)
+
+    # Backward compat — single URI env
+    single_uri = os.getenv("BACKUP_MONGO_URI", "").strip()
+    if single_uri and single_uri not in _BACKUP_URIS:
+        _BACKUP_URIS.insert(0, single_uri)
+
+    _backup_clients = []
+    _backup_dbs = []
+
+    for uri in _BACKUP_URIS:
+        try:
+            client = _BackupMongoClient(uri, serverSelectionTimeoutMS=8000)
+            db_handle = client[_BACKUP_DBNAME]
+            _backup_clients.append(client)
+            _backup_dbs.append(db_handle)
+            logger.info(f"[BACKUP] Backup Mongo shard connected: {len(_backup_dbs)}")
+        except Exception as e:
+            logger.warning(f"[BACKUP] Shard failed: {e}")
+
+    if _backup_dbs:
+        _backup_db = _backup_dbs[0]  # backward compat — first shard
+        logger.info(f"[BACKUP] {len(_backup_dbs)} backup shard(s) active")
+    else:
+        _backup_db = None
+        logger.warning("[BACKUP] No backup Mongo configured — using Media DB (may fill up!)")
+except Exception as _e:
+    _backup_db = None
+    _backup_dbs = []
+    logger.exception(f"[BACKUP] Backup Mongo init failed: {_e}")
 
 # ============================================================
 # CONFIGURATION
@@ -316,27 +357,51 @@ def source_collection(database):
 
 
 # ============================================================
-# STATE COLLECTION
+# STATE COLLECTION — uses SEPARATE Mongo DB if configured
 # ============================================================
 
-def state_collection():
+def state_collection(shard_index: int = 0):
+    """Return state collection from a specific shard (default: first)."""
+    if _backup_dbs:
+        if 0 <= shard_index < len(_backup_dbs):
+            return _backup_dbs[shard_index][BACKUP_STATE_COLLECTION]
+        return _backup_dbs[0][BACKUP_STATE_COLLECTION]
+
     if db is None:
         return None
-
-    return db[
-        BACKUP_STATE_COLLECTION
-    ]
+    return db[BACKUP_STATE_COLLECTION]
 
 
-def run_collection():
+def run_collection(shard_index: int = 0):
+    """Run history always stored in shard 0 (small data)."""
+    if _backup_dbs:
+        return _backup_dbs[0][BACKUP_RUN_COLLECTION]
+
     if db is None:
         return None
-
-    return db[
-        BACKUP_RUN_COLLECTION
-    ]
+    return db[BACKUP_RUN_COLLECTION]
 
 
+def get_shard_for_file(source_db: str, file_id: str) -> int:
+    """
+    Deterministic shard selection.
+    Same file always goes to same shard → consistent reads.
+    """
+    if not _backup_dbs:
+        return 0
+
+    key = f"{source_db}:{file_id}".encode("utf-8")
+    h = int.from_bytes(key[:4], "big")
+    return h % len(_backup_dbs)
+
+
+def all_state_collections():
+    """Return all shard state collections for cross-shard queries."""
+    if _backup_dbs:
+        return [d[BACKUP_STATE_COLLECTION] for d in _backup_dbs]
+    if db is not None:
+        return [db[BACKUP_STATE_COLLECTION]]
+    return []
 # ============================================================
 # RUNTIME
 # ============================================================
@@ -705,86 +770,44 @@ def backup_token(
 # ============================================================
 
 async def ensure_indexes():
-    collection = state_collection()
-
-    if collection is None:
+    if not all_state_collections():
         return False
 
     try:
-        await collection.create_index(
-            [
-                (
-                    "source_db",
-                    1,
-                ),
-                (
-                    "file_id",
-                    1,
-                ),
-            ],
-            unique=True,
-            name="source_file_unique",
-        )
-
-        await collection.create_index(
-            [
-                (
-                    "source_db",
-                    1,
-                ),
-                (
-                    "status",
-                    1,
-                ),
-            ],
-            name="source_status",
-        )
-
-        await collection.create_index(
-            [
-                (
-                    "status",
-                    1,
-                ),
-                (
-                    "updated_at",
-                    1,
-                ),
-            ],
-            name="status_updated",
-        )
-
-        await collection.create_index(
-            [
-                (
-                    "backup_token",
-                    1,
-                ),
-            ],
-            unique=True,
-            sparse=True,
-            name="backup_token_unique",
-        )
+        for collection in all_state_collections():
+            try:
+                await collection.create_index(
+                    [("source_db", 1), ("file_id", 1)],
+                    unique=True,
+                    name="source_file_unique",
+                )
+                await collection.create_index(
+                    [("source_db", 1), ("status", 1)],
+                    name="source_status",
+                )
+                await collection.create_index(
+                    [("status", 1), ("updated_at", 1)],
+                    name="status_updated",
+                )
+                await collection.create_index(
+                    [("backup_token", 1)],
+                    unique=True,
+                    sparse=True,
+                    name="backup_token_unique",
+                )
+            except Exception:
+                logger.exception("Index creation failed on a shard")
 
         runs = run_collection()
-
         if runs is not None:
             await runs.create_index(
-                [
-                    (
-                        "started_at",
-                        -1,
-                    ),
-                ],
+                [("started_at", -1)],
                 name="runs_started",
             )
 
         return True
-
     except Exception:
-        logger.exception(
-            "Backup index creation failed"
-        )
+        logger.exception("Backup index creation failed")
         return False
 
 
@@ -796,22 +819,34 @@ async def get_state(
     source_db,
     file_id,
 ):
-    collection = state_collection()
-
-    if collection is None:
+    """Read from the correct shard."""
+    fid = str(file_id)
+    idx = get_shard_for_file(source_db, fid)
+    coll = state_collection(idx)
+    if coll is None:
         return None
-
     try:
-        return await collection.find_one(
+        rec = await coll.find_one(
             {
                 "source_db": source_db,
-                "file_id": str(file_id),
+                "file_id": fid,
             }
         )
+        if rec:
+            return rec
+        # Fallback: search all shards
+        for c in all_state_collections():
+            rec = await c.find_one(
+                {
+                    "source_db": source_db,
+                    "file_id": fid,
+                }
+            )
+            if rec:
+                return rec
+        return None
     except Exception:
-        logger.exception(
-            "Backup state read failed"
-        )
+        logger.exception("Backup state read failed")
         return None
 
 
@@ -844,70 +879,45 @@ async def set_state(
     error=None,
     attempts=None,
 ):
-    collection = state_collection()
-
-    if collection is None:
-        raise RuntimeError(
-            "Backup state collection unavailable"
-        )
-
-    file_id = source_file_id(
-        document
-    )
-
+    """Write to the correct shard."""
+    file_id = source_file_id(document)
     if not file_id:
-        raise ValueError(
-            "Document has no file_id"
-        )
+        raise ValueError("Document has no file_id")
 
-    token = backup_token(
-        source_db,
-        file_id,
-    )
+    fid = str(file_id)
+    idx = get_shard_for_file(source_db, fid)
+    coll = state_collection(idx)
+    if coll is None:
+        raise RuntimeError("Backup state collection unavailable")
 
+    token = backup_token(source_db, fid)
     timestamp = now()
 
     update = {
         "$set": {
             "source_db": source_db,
-            "file_id": file_id,
-            "file_name": source_file_name(
-                document
-            ),
-            "file_size": source_file_size(
-                document
-            ),
+            "file_id": fid,
+            "file_name": source_file_name(document),
+            "file_size": source_file_size(document),
             "backup_token": token,
-            "status": str(
-                status
-            ).upper(),
+            "status": str(status).upper(),
             "updated_at": timestamp,
+            "shard_index": idx,
         },
-        "$setOnInsert": {
-            "created_at": timestamp,
-        },
+        "$setOnInsert": {"created_at": timestamp},
     }
 
     if message_id is not None:
-        update["$set"][
-            "message_id"
-        ] = int(message_id)
+        update["$set"]["message_id"] = int(message_id)
 
     if error is not None:
-        update["$set"][
-            "last_error"
-        ] = str(error)[:4000]
+        update["$set"]["last_error"] = str(error)[:4000]
 
     if attempts is not None:
-        update["$set"][
-            "attempts"
-        ] = int(attempts)
+        update["$set"]["attempts"] = int(attempts)
 
-    await collection.update_one(
-        {
-            "source_db": source_db,
-            "file_id": file_id,
-        },
+    await coll.update_one(
+        {"source_db": source_db, "file_id": fid},
         update,
         upsert=True,
     )
@@ -993,25 +1003,17 @@ async def mark_failed(
 
 
 async def reset_failed():
-    collection = state_collection()
-
-    if collection is None:
-        return 0
-
-    result = await collection.update_many(
-        {
-            "status": "FAILED",
-        },
-        {
-            "$set": {
-                "status": "PENDING",
-                "updated_at": now(),
-            }
-        },
-    )
-
-    return result.modified_count
-
+    total = 0
+    for coll in all_state_collections():
+        try:
+            r = await coll.update_many(
+                {"status": "FAILED"},
+                {"$set": {"status": "PENDING", "updated_at": now()}},
+            )
+            total += r.modified_count
+        except Exception:
+            pass
+    return total
 
 # ============================================================
 # RUN HISTORY
@@ -1104,32 +1106,21 @@ async def count_state(
     source_db=None,
     status=None,
 ):
-    collection = state_collection()
-
-    if collection is None:
-        return 0
-
     query = {}
 
     if source_db:
-        query[
-            "source_db"
-        ] = source_db
+        query["source_db"] = source_db
 
     if status:
-        query[
-            "status"
-        ] = str(
-            status
-        ).upper()
+        query["status"] = str(status).upper()
 
-    try:
-        return await collection.count_documents(
-            query
-        )
-    except Exception:
-        return 0
-
+    total = 0
+    for coll in all_state_collections():
+        try:
+            total += await coll.count_documents(query)
+        except Exception:
+            pass
+    return total
 
 async def source_count(
     source_db,
@@ -1337,26 +1328,24 @@ async def pending_batch(
 async def uploading_records(
     limit=2000,
 ):
-    collection = state_collection()
-
-    if collection is None:
+    out = []
+    colls = all_state_collections()
+    if not colls:
         return []
-
-    cursor = collection.find(
-        {
-            "status": "UPLOADING",
-        }
-    ).sort(
-        "updated_at",
-        1,
-    ).limit(
-        int(limit)
-    )
-
-    return await cursor.to_list(
-        length=int(limit)
-    )
-
+    per = max(1, int(limit) // len(colls))
+    for coll in colls:
+        try:
+            cursor = coll.find(
+                {"status": "UPLOADING"}
+            ).sort(
+                "updated_at",
+                1,
+            ).limit(per)
+            recs = await cursor.to_list(length=per)
+            out.extend(recs)
+        except Exception:
+            pass
+    return out[:int(limit)]
 
 async def find_source_document(
     source_db,
@@ -13830,3 +13819,357 @@ def backup_diagnostic_800(value=None):
     Media3, or backup state.
     """
     return value
+
+
+# ============================================================
+# FULL BACKUP RESET — /reset_backup  +  RESET button
+# ============================================================
+#
+# Wipes EVERYTHING:
+#   • backup_state across ALL shards
+#   • backup_runs across ALL shards
+#   • resets in-memory counters
+#
+# After reset, the next backup run will re-upload from scratch.
+#
+# ============================================================
+
+
+# ── State counters to clear ──────────────────────────────────
+_RESETTABLE_STATE_KEYS = (
+    "started_at",
+    "finished_at",
+    "current_db",
+    "current_db_number",
+    "current_file",
+    "current_file_id",
+    "current_file_size",
+    "current_source_index",
+    "current_source_total",
+    "current_uploaded",
+    "current_failed",
+    "current_skipped",
+    "total_uploaded",
+    "total_failed",
+    "total_skipped",
+    "speed",
+    "eta",
+    "last_error",
+    "last_activity",
+    "last_success",
+    "last_message_id",
+    "last_cycle",
+    "last_scan",
+    "run_id",
+    "message",
+)
+
+
+async def reset_all_backup_state():
+    """
+    Wipe all backup state + run history across every shard.
+    Returns dict with per-shard deleted counts.
+    """
+    result = {
+        "state_total": 0,
+        "runs_total": 0,
+        "per_shard": [],
+        "errors": [],
+    }
+
+    state_colls = all_state_collections()
+
+    if not state_colls:
+        result["errors"].append("No backup shards available")
+        return result
+
+    for idx, coll in enumerate(state_colls):
+        shard_info = {"shard": idx + 1, "state": 0, "runs": 0, "error": None}
+
+        # Delete state
+        try:
+            r = await coll.delete_many({})
+            shard_info["state"] = r.deleted_count
+            result["state_total"] += r.deleted_count
+        except Exception as e:
+            shard_info["error"] = f"state: {e}"
+            result["errors"].append(f"Shard {idx + 1} state: {e}")
+
+        # Delete runs on shard 0 only (runs live there)
+        if idx == 0:
+            try:
+                rc = run_collection()
+                if rc is not None:
+                    r = await rc.delete_many({})
+                    shard_info["runs"] = r.deleted_count
+                    result["runs_total"] += r.deleted_count
+            except Exception as e:
+                shard_info["error"] = (shard_info["error"] or "") + f" runs: {e}"
+                result["errors"].append(f"Shard {idx + 1} runs: {e}")
+
+        result["per_shard"].append(shard_info)
+
+    # ── Reset in-memory STATE counters ──
+    for key in _RESETTABLE_STATE_KEYS:
+        if key in STATE:
+            STATE[key] = None if key in (
+                "started_at", "finished_at", "last_error",
+                "last_activity", "last_success",
+                "last_message_id", "run_id",
+                "current_db", "current_file", "current_file_id",
+            ) else (
+                0 if isinstance(STATE.get(key), int) else
+                (0.0 if isinstance(STATE.get(key), float) else "")
+            )
+
+    # Specific defaults
+    STATE["mode"] = "IDLE"
+    STATE["message"] = "Reset complete — ready for fresh start"
+    STATE["speed"] = 0.0
+    STATE["eta"] = None
+    STATE["current_file_size"] = 0
+    STATE["run_id"] = None
+
+    return result
+
+
+# ── Confirmation prompt ───────────────────────────────────────
+def _reset_confirm_keyboard():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🗑️ YES, DELETE EVERYTHING",
+                callback_data="dtv_backup_reset_confirm",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "❌ CANCEL",
+                callback_data="dtv_backup_reset_cancel",
+            ),
+        ],
+    ])
+
+
+def _build_reset_confirm_text():
+    colls = all_state_collections()
+    shard_count = len(colls)
+
+    return (
+        "⚠️ <b>FULL BACKUP RESET</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "This will <b>PERMANENTLY DELETE</b>:\n\n"
+        f"  🗄️ Backup state — <b>ALL {shard_count} shard(s)</b>\n"
+        "  📋 Run history\n"
+        "  🔢 All progress counters\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ <b>What happens next:</b>\n"
+        "  • Every file will be treated as NEW\n"
+        "  • The next backup run will re-upload from scratch\n"
+        "  • Files already in your backup channel will be <b>duplicated</b>\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "⚠️ <b>This CANNOT be undone.</b>\n\n"
+        "Type or click to proceed 👇"
+    )
+
+
+# ── /reset_backup command ─────────────────────────────────────
+@Client.on_message(
+    filters.command("reset_backup")
+)
+async def reset_backup_command(client, message):
+    user = message.from_user
+
+    if user is None or not is_admin(user.id):
+        return
+
+    STATE["_client"] = client
+
+    text = _build_reset_confirm_text()
+
+    await message.reply_text(
+        text,
+        reply_markup=_reset_confirm_keyboard(),
+        disable_web_page_preview=True,
+    )
+
+
+# ── RESET button on main panel ────────────────────────────────
+def backup_reset_button():
+    """Extra row you can add to your main keyboard."""
+    return [
+        InlineKeyboardButton(
+            "🔄 FULL RESET",
+            callback_data="dtv_backup_reset_prompt",
+        ),
+    ]
+
+
+# ── Callback: prompt shown ────────────────────────────────────
+@Client.on_callback_query(
+    filters.regex(r"^dtv_backup_reset_prompt$")
+)
+async def cb_reset_prompt(client, query):
+    user = query.from_user
+
+    if user is None or not is_admin(user.id):
+        await query.answer("❌ Access denied", show_alert=True)
+        return
+
+    STATE["_client"] = client
+
+    text = _build_reset_confirm_text()
+
+    await safe_edit(
+        query.message,
+        text,
+        _reset_confirm_keyboard(),
+    )
+
+    await query.answer("⚠️ Confirm to reset")
+
+
+# ── Callback: confirmed ───────────────────────────────────────
+@Client.on_callback_query(
+    filters.regex(r"^dtv_backup_reset_confirm$")
+)
+async def cb_reset_confirm(client, query):
+    user = query.from_user
+
+    if user is None or not is_admin(user.id):
+        await query.answer("❌ Access denied", show_alert=True)
+        return
+
+    STATE["_client"] = client
+
+    await query.answer("🗑️ Deleting...", show_alert=False)
+
+    # Show "in progress"
+    await safe_edit(
+        query.message,
+        (
+            "🗑️ <b>RESETTING BACKUP STATE...</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            "⏳ This may take a few seconds...\n"
+        ),
+    )
+
+    try:
+        result = await reset_all_backup_state()
+
+        # Build result text
+        lines = [
+            "✅ <b>BACKUP RESET COMPLETE</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "",
+            f"🗄️ State docs deleted: <b>{fmt_int(result['state_total'])}</b>",
+            f"📋 Run history deleted: <b>{fmt_int(result['runs_total'])}</b>",
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "📊 <b>Per shard:</b>",
+            "",
+        ]
+
+        for s in result["per_shard"]:
+            icon = "🟢" if not s["error"] else "🔴"
+            lines.append(
+                f"{icon} Shard #{s['shard']}: "
+                f"<b>{fmt_int(s['state'])}</b> state, "
+                f"<b>{fmt_int(s['runs'])}</b> runs"
+            )
+            if s["error"]:
+                lines.append(f"     ⚠️ <code>{html_escape(s['error'])[:120]}</code>")
+
+        if result["errors"]:
+            lines += [
+                "",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "⚠️ <b>Some errors occurred</b> — check logs.",
+            ]
+
+        lines += [
+            "",
+            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "🎉 <b>Next backup will start fresh.</b>",
+            "   Every file is now treated as NEW.",
+            "",
+            f"🕒 <code>{now_text()}</code>",
+        ]
+
+        final_text = "\n".join(lines)[:4000]
+
+        # Show main panel button
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(
+                    "🔄 REFRESH PANEL",
+                    callback_data="dtv_backup_live",
+                ),
+                InlineKeyboardButton(
+                    "▶️ START NOW",
+                    callback_data="dtv_backup_start",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "❌ CLOSE",
+                    callback_data="dtv_backup_close",
+                ),
+            ],
+        ])
+
+        await safe_edit(query.message, final_text, kb)
+
+        logger.info(
+            "[BACKUP][RESET] State deleted=%s runs deleted=%s",
+            result["state_total"],
+            result["runs_total"],
+        )
+
+    except Exception as exc:
+        logger.exception("Backup reset failed")
+        await safe_edit(
+            query.message,
+            (
+                "❌ <b>RESET FAILED</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"<code>{html_escape(str(exc))[:400]}</code>\n\n"
+                "Check logs for details."
+            ),
+            InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "◀️ BACK",
+                    callback_data="dtv_backup_live",
+                ),
+            ]]),
+        )
+
+
+# ── Callback: cancelled ───────────────────────────────────────
+@Client.on_callback_query(
+    filters.regex(r"^dtv_backup_reset_cancel$")
+)
+async def cb_reset_cancel(client, query):
+    user = query.from_user
+
+    if user is None or not is_admin(user.id):
+        await query.answer("❌ Access denied", show_alert=True)
+        return
+
+    await query.answer("❌ Cancelled")
+
+    STATE["_client"] = client
+
+    # Return to main panel
+    text = await build_status_page()
+
+    await safe_edit(
+        query.message,
+        text,
+        backup_keyboard(),
+    )
+
+    open_panel(query.message, "live")
+
+
+logger.info("[BACKUP] Reset module loaded — /reset_backup")
