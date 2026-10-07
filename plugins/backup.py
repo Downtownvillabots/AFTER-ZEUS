@@ -423,7 +423,7 @@ def progress_bar(current, total, length=20):
     else:
         fill = "🟥"
 
-    empty = "⬜"
+    empty = "⬛"
     bar = fill * filled + empty * (length - filled)
     return f"<code>{bar}</code> <b>{percent:.1f}%</b>"
 
