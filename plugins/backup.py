@@ -1,80 +1,12 @@
-
 # ============================================================
-# DOWNTOWN VILLA — ULTIMATE BACKUP PLUGIN
+# DOWNTOWN VILLA — ULTIMATE BACKUP PLUGIN  (fast + self-healing)
 # ============================================================
 #
 # ONE ADMIN COMMAND:
 #
 #     /backup
 #
-# Everything is controlled from one live panel.
-#
-# FEATURES
-# ------------------------------------------------------------
-# • Media -> Media2 -> Media3 ordered backup
-# • Resumes from the exact persistent database state
-# • Never starts from the beginning after restart
-# • Separate backup-state MongoDB collection
-# • Does not modify Media / Media2 / Media3 documents
-# • New files are detected continuously
-# • Newly indexed files are backed up automatically
-# • Existing files are backed up automatically
-# • Failed files can be retried
-# • FloodWait handling
-# • RPC error handling
-# • Exponential retry delay
-# • Persistent Telegram message ID
-# • Persistent upload status
-# • Crash-window reconciliation
-# • Deterministic backup token
-# • Live speed
-# • Live ETA
-# • Live database progress
-# • Live current file
-# • Live current database
-# • Live total source files
-# • Live uploaded / pending / failed
-# • Live backup history
-# • Live failure list
-# • Live MongoDB state health
-# • Live backup-channel health
-# • Pause
-# • Resume
-# • Graceful stop
-# • Continue
-# • Retry failed
-# • Reconcile interrupted uploads
-# • Automatic background watcher
-# • Single /backup command
-# • Admin-only access
-#
-# REQUIRED ENVIRONMENT
-# ------------------------------------------------------------
-#
-# BACKUP_CHANNEL_ID=-100xxxxxxxxxxxx
-#
-# OPTIONAL
-#
-# BACKUP_AUTO_START=true
-# BACKUP_WATCH_INTERVAL=5
-# BACKUP_UPLOAD_DELAY=0.5
-# BACKUP_RETRY_DELAY=5
-# BACKUP_MAX_RETRIES=8
-# BACKUP_RECONCILE_MESSAGES=1000
-# BACKUP_STATE_COLLECTION=<auto generated>
-# BACKUP_RUN_COLLECTION=<auto generated>
-#
-# IMPORTANT
-# ------------------------------------------------------------
-# This file is intended to be placed in plugins/backup.py.
-#
-# It uses the application's existing:
-#
-#     database.ia_filterdb
-#
-# and the REAL Pyrogram Client for Telegram.
-#
-# MongoDB is never used as a Telegram client.
+# Media -> Media2 -> Media3 ordered, resumable, self-healing panel.
 #
 # ============================================================
 
@@ -129,13 +61,11 @@ try:
     _BACKUP_DBNAME = os.getenv("BACKUP_MONGO_DB", "downtown_backup")
     _BACKUP_URIS = []
 
-    # Multi-shard envs
     for i in range(1, 11):
         uri = os.getenv(f"BACKUP_MONGO_URI_{i}", "").strip()
         if uri:
             _BACKUP_URIS.append(uri)
 
-    # Backward compat — single URI env
     single_uri = os.getenv("BACKUP_MONGO_URI", "").strip()
     if single_uri and single_uri not in _BACKUP_URIS:
         _BACKUP_URIS.insert(0, single_uri)
@@ -154,7 +84,7 @@ try:
             logger.warning(f"[BACKUP] Shard failed: {e}")
 
     if _backup_dbs:
-        _backup_db = _backup_dbs[0]  # backward compat — first shard
+        _backup_db = _backup_dbs[0]
         logger.info(f"[BACKUP] {len(_backup_dbs)} backup shard(s) active")
     else:
         _backup_db = None
@@ -164,93 +94,41 @@ except Exception as _e:
     _backup_dbs = []
     logger.exception(f"[BACKUP] Backup Mongo init failed: {_e}")
 
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-BACKUP_CHANNEL_ID_RAW = os.getenv(
-    "BACKUP_CHANNEL_ID",
-    "",
-).strip()
+BACKUP_CHANNEL_ID_RAW = os.getenv("BACKUP_CHANNEL_ID", "").strip()
 
-BACKUP_AUTO_START = os.getenv(
-    "BACKUP_AUTO_START",
-    "true",
-).lower() in {
-    "true",
-    "1",
-    "yes",
-    "on",
+BACKUP_AUTO_START = os.getenv("BACKUP_AUTO_START", "true").lower() in {
+    "true", "1", "yes", "on",
 }
 
-BACKUP_WATCH_INTERVAL = max(
-    2,
-    int(
-        os.getenv(
-            "BACKUP_WATCH_INTERVAL",
-            "5",
-        )
-    ),
-)
-
-BACKUP_UPLOAD_DELAY = max(
-    0.0,
-    float(
-        os.getenv(
-            "BACKUP_UPLOAD_DELAY",
-            "0.5",
-        )
-    ),
-)
-
-BACKUP_RETRY_DELAY = max(
-    1,
-    int(
-        os.getenv(
-            "BACKUP_RETRY_DELAY",
-            "5",
-        )
-    ),
-)
-
-BACKUP_MAX_RETRIES = max(
-    1,
-    int(
-        os.getenv(
-            "BACKUP_MAX_RETRIES",
-            "8",
-        )
-    ),
-)
-
-BACKUP_RECONCILE_MESSAGES = max(
-    100,
-    int(
-        os.getenv(
-            "BACKUP_RECONCILE_MESSAGES",
-            "1000",
-        )
-    ),
-)
+BACKUP_WATCH_INTERVAL = max(2, int(os.getenv("BACKUP_WATCH_INTERVAL", "5")))
+BACKUP_UPLOAD_DELAY   = max(0.0, float(os.getenv("BACKUP_UPLOAD_DELAY", "0.5")))
+BACKUP_RETRY_DELAY    = max(1, int(os.getenv("BACKUP_RETRY_DELAY", "5")))
+BACKUP_MAX_RETRIES    = max(1, int(os.getenv("BACKUP_MAX_RETRIES", "8")))
+BACKUP_RECONCILE_MESSAGES = max(100, int(os.getenv("BACKUP_RECONCILE_MESSAGES", "1000")))
 
 BACKUP_STATE_COLLECTION = os.getenv(
     "BACKUP_STATE_COLLECTION",
     f"{COLLECTION_NAME}_backup_state",
 )
-
 BACKUP_RUN_COLLECTION = os.getenv(
     "BACKUP_RUN_COLLECTION",
     f"{COLLECTION_NAME}_backup_runs",
 )
-
 BACKUP_PANEL_COLLECTION = os.getenv(
     "BACKUP_PANEL_COLLECTION",
     f"{COLLECTION_NAME}_backup_panel",
 )
+BACKUP_TOKEN_PREFIX = os.getenv("BACKUP_TOKEN_PREFIX", "DTV-BACKUP")
 
-BACKUP_TOKEN_PREFIX = os.getenv(
-    "BACKUP_TOKEN_PREFIX",
-    "DTV-BACKUP",
+# Larger batches → far fewer Mongo round-trips during scan
+BACKUP_SCAN_BATCH = max(100, int(os.getenv("BACKUP_SCAN_BATCH", "1000")))
+BACKUP_UPLOADED_PRELOAD_BATCH = max(
+    1000, int(os.getenv("BACKUP_UPLOADED_PRELOAD_BATCH", "5000"))
 )
 
 
@@ -260,7 +138,6 @@ BACKUP_TOKEN_PREFIX = os.getenv(
 
 def _build_admin_set():
     result = set()
-
     values = ADMINS
 
     if isinstance(values, (str, int)):
@@ -278,11 +155,7 @@ def _build_admin_set():
     except Exception:
         pass
 
-    env_admins = os.getenv(
-        "ADMINS",
-        "",
-    ).replace(",", " ").split()
-
+    env_admins = os.getenv("ADMINS", "").replace(",", " ").split()
     for value in env_admins:
         try:
             result.add(int(value))
@@ -309,11 +182,8 @@ def is_admin(user_id):
 def get_backup_channel_id():
     if not BACKUP_CHANNEL_ID_RAW:
         return None
-
     try:
-        return int(
-            BACKUP_CHANNEL_ID_RAW
-        )
+        return int(BACKUP_CHANNEL_ID_RAW)
     except Exception:
         return None
 
@@ -327,67 +197,47 @@ def backup_configured():
 # ============================================================
 
 SOURCE_DATABASES = [
-    (
-        "Media",
-        db,
-        1,
-    ),
-    (
-        "Media2",
-        db2,
-        2,
-    ),
-    (
-        "Media3",
-        db3,
-        3,
-    ),
+    ("Media", db, 1),
+    ("Media2", db2, 2),
+    ("Media3", db3, 3),
 ]
 
 
 def enabled_source_databases():
     if MULTIPLE_DB:
         return SOURCE_DATABASES
-
     return SOURCE_DATABASES[:1]
 
 
 def source_collection(database):
     if database is None:
         return None
-
-    return database[
-        COLLECTION_NAME
-    ]
+    return database[COLLECTION_NAME]
 
 
 # ============================================================
-# STATE COLLECTION — uses SEPARATE Mongo DB if configured
+# COLLECTION ACCESSORS
 # ============================================================
 
 def state_collection(shard_index: int = 0):
-    """Return state collection from a specific shard (default: first)."""
     if _backup_dbs:
         if 0 <= shard_index < len(_backup_dbs):
             return _backup_dbs[shard_index][BACKUP_STATE_COLLECTION]
         return _backup_dbs[0][BACKUP_STATE_COLLECTION]
-
     if db is None:
         return None
     return db[BACKUP_STATE_COLLECTION]
 
 
 def run_collection(shard_index: int = 0):
-    """Run history always stored in shard 0 (small data)."""
     if _backup_dbs:
         return _backup_dbs[0][BACKUP_RUN_COLLECTION]
-
     if db is None:
         return None
     return db[BACKUP_RUN_COLLECTION]
 
+
 def panel_collection():
-    """Dedicated persistent panel-state collection (shard 0)."""
     if _backup_dbs:
         return _backup_dbs[0][BACKUP_PANEL_COLLECTION]
     if db is not None:
@@ -396,27 +246,23 @@ def panel_collection():
 
 
 def get_shard_for_file(source_db: str, file_id: str) -> int:
-    """
-    Deterministic shard selection.
-    Same file always goes to same shard → consistent reads.
-    """
     if not _backup_dbs:
         return 0
-
     key = f"{source_db}:{file_id}".encode("utf-8")
     h = int.from_bytes(key[:4], "big")
     return h % len(_backup_dbs)
 
 
 def all_state_collections():
-    """Return all shard state collections for cross-shard queries."""
     if _backup_dbs:
         return [d[BACKUP_STATE_COLLECTION] for d in _backup_dbs]
     if db is not None:
         return [db[BACKUP_STATE_COLLECTION]]
     return []
+
+
 # ============================================================
-# RUNTIME
+# RUNTIME STATE
 # ============================================================
 
 STATE = {
@@ -424,43 +270,35 @@ STATE = {
     "paused": False,
     "stop_requested": False,
     "mode": "IDLE",
-
     "started_at": None,
     "finished_at": None,
-
     "current_db": None,
     "current_db_number": 0,
-
     "current_file": None,
     "current_file_id": None,
     "current_file_size": 0,
-
     "current_source_index": 0,
     "current_source_total": 0,
-
     "current_uploaded": 0,
     "current_failed": 0,
     "current_skipped": 0,
-
     "total_uploaded": 0,
     "total_failed": 0,
     "total_skipped": 0,
-
     "speed": 0.0,
     "eta": None,
-
     "last_error": None,
     "last_activity": None,
     "last_success": None,
     "last_message_id": None,
-
     "last_cycle": 0,
     "last_scan": None,
-
     "run_id": None,
-
     "message": "",
     "worker_pid": os.getpid(),
+    "flood_wait_until": None,
+    "last_flood_wait": None,
+    "preload_progress": None,
 }
 
 
@@ -482,9 +320,7 @@ def now():
 
 
 def now_text():
-    return now().strftime(
-        "%d %b %Y • %H:%M:%S UTC"
-    )
+    return now().strftime("%d %b %Y • %H:%M:%S UTC")
 
 
 def fmt_int(value):
@@ -506,94 +342,40 @@ def fmt_bytes(value):
         value = float(value)
     except Exception:
         return "0 B"
-
     if value <= 0:
         return "0 B"
-
-    units = (
-        "B",
-        "KB",
-        "MB",
-        "GB",
-        "TB",
-        "PB",
-        "EB",
-    )
-
+    units = ("B", "KB", "MB", "GB", "TB", "PB", "EB")
     index = 0
-
-    while (
-        value >= 1024
-        and index < len(units) - 1
-    ):
+    while value >= 1024 and index < len(units) - 1:
         value /= 1024
         index += 1
-
-    return (
-        f"{value:.2f} "
-        f"{units[index]}"
-    )
+    return f"{value:.2f} {units[index]}"
 
 
 def fmt_duration(seconds):
     if seconds is None:
         return "0s"
-
     try:
-        seconds = max(
-            0,
-            int(seconds),
-        )
+        seconds = max(0, int(seconds))
     except Exception:
         return "0s"
-
-    days, seconds = divmod(
-        seconds,
-        86400,
-    )
-
-    hours, seconds = divmod(
-        seconds,
-        3600,
-    )
-
-    minutes, seconds = divmod(
-        seconds,
-        60,
-    )
-
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
     parts = []
-
     if days:
-        parts.append(
-            f"{days}d"
-        )
-
+        parts.append(f"{days}d")
     if hours:
-        parts.append(
-            f"{hours}h"
-        )
-
+        parts.append(f"{hours}h")
     if minutes:
-        parts.append(
-            f"{minutes}m"
-        )
-
+        parts.append(f"{minutes}m")
     if seconds or not parts:
-        parts.append(
-            f"{seconds}s"
-        )
-
+        parts.append(f"{seconds}s")
     return " ".join(parts)
 
 
 def html_escape(value):
-    text = str(
-        value
-        if value is not None
-        else ""
-    )
-
+    text = str(value if value is not None else "")
     return (
         text
         .replace("&", "&amp;")
@@ -603,23 +385,21 @@ def html_escape(value):
 
 
 def short(value, length=90):
-    text = str(
-        value
-        if value is not None
-        else "-"
-    )
-
+    text = str(value if value is not None else "-")
     if len(text) <= length:
         return text
-
     return text[: length - 3] + "..."
 
 
-def progress_bar(
-    current,
-    total,
-    length=20,
-):
+# ============================================================
+# COLORFUL PROGRESS BAR  🟢🟡🟠🔴
+# ============================================================
+
+def progress_bar(current, total, length=20):
+    """
+    Colored emoji progress bar.
+    Color changes with progress: red → orange → yellow → green.
+    """
     try:
         current = float(current)
         total = float(total)
@@ -628,154 +408,86 @@ def progress_bar(
         total = 0
 
     if total <= 0:
-        percent = 0
+        percent = 0.0
     else:
-        percent = (
-            current / total
-        ) * 100
+        percent = (current / total) * 100
 
-    percent = max(
-        0,
-        min(
-            100,
-            percent,
-        ),
-    )
+    percent = max(0.0, min(100.0, percent))
+    filled = int(length * percent / 100)
 
-    filled = int(
-        length
-        * percent
-        / 100
-    )
+    # Color by percent
+    if percent >= 90:
+        fill, badge = "🟩", "✅"
+    elif percent >= 70:
+        fill, badge = "🟢", "🟢"
+    elif percent >= 40:
+        fill, badge = "🟡", "🟡"
+    elif percent >= 15:
+        fill, badge = "🟠", "🟠"
+    else:
+        fill, badge = "🔴", "🔴"
 
-    return (
-        "█" * filled
-        + "░" * (
-            length - filled
-        )
-        + f" {percent:.1f}%"
-    )
+    empty = "⬜"
+    bar = fill * filled + empty * (length - filled)
+
+    return f"{badge} <code>{bar}</code> <b>{percent:.1f}%</b>"
 
 
 def status_icon(status):
-    status = str(
-        status or ""
-    ).upper()
+    status = str(status or "").upper()
 
-    if status in {
-        "ONLINE",
-        "RUNNING",
-        "UPLOADED",
-        "COMPLETED",
-        "CONNECTED",
-        "ACTIVE",
-    }:
+    if status in {"ONLINE", "RUNNING", "UPLOADED", "COMPLETED", "CONNECTED", "ACTIVE"}:
         return "🟢"
-
-    if status in {
-        "FAILED",
-        "ERROR",
-        "OFFLINE",
-        "STOPPED",
-    }:
+    if status in {"FAILED", "ERROR", "OFFLINE", "STOPPED", "CANCELLED"}:
         return "🔴"
-
-    if status in {
-        "PAUSED",
-        "WAITING",
-        "PENDING",
-        "UPLOADING",
-        "RECONCILING",
-    }:
+    if status in {"PAUSED", "WAITING", "PENDING", "UPLOADING", "RECONCILING"}:
         return "🟡"
-
+    if status in {"FLOOD_WAIT"}:
+        return "🌊"
     return "⚪"
 
 
 def source_file_id(document):
-    value = document.get(
-        "_id"
-    )
-
+    value = document.get("_id")
     if value is None:
-        value = document.get(
-            "file_id"
-        )
-
+        value = document.get("file_id")
     if value is None:
         return None
-
     return str(value)
 
 
 def source_file_name(document):
-    value = document.get(
-        "file_name"
-    )
-
+    value = document.get("file_name")
     if value:
         return str(value)
-
     return "Unknown File"
 
 
 def source_file_size(document):
     try:
-        return int(
-            document.get(
-                "file_size",
-                0,
-            )
-            or 0
-        )
+        return int(document.get("file_size", 0) or 0)
     except Exception:
         return 0
 
 
 def source_caption(document):
-    value = document.get(
-        "caption"
-    )
-
+    value = document.get("caption")
     if value:
         return str(value)
-
-    return source_file_name(
-        document
-    )
+    return source_file_name(document)
 
 
-def backup_key(
-    source_db,
-    file_id,
-):
-    return (
-        f"{source_db}:"
-        f"{file_id}"
-    )
+def backup_key(source_db, file_id):
+    return f"{source_db}:{file_id}"
 
 
-def backup_token(
-    source_db,
-    file_id,
-):
+def backup_token(source_db, file_id):
     raw = (
-        f"{BACKUP_TOKEN_PREFIX}|"
-        f"{source_db}|"
-        f"{file_id}"
-    ).encode(
-        "utf-8"
-    )
+        f"{BACKUP_TOKEN_PREFIX}|{source_db}|{file_id}"
+    ).encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    return f"{BACKUP_TOKEN_PREFIX}-{source_db}-{digest[:32]}"
 
-    digest = hashlib.sha256(
-        raw
-    ).hexdigest()
-
-    return (
-        f"{BACKUP_TOKEN_PREFIX}-"
-        f"{source_db}-"
-        f"{digest[:32]}"
-    )
 
 # ============================================================
 # PANEL MESSAGE RECOVERY
@@ -783,11 +495,8 @@ def backup_token(
 
 def _is_invalid_message_error(exc) -> bool:
     """
-    Return True only when the error clearly means the stored panel
-    message can no longer be edited and MUST be replaced.
-
-    We deliberately do NOT treat FloodWait or generic transient RPC
-    failures as 'invalid' — those keep their existing retry handling.
+    True only when the stored panel message can no longer be edited.
+    FloodWait / transient RPC are NOT treated as invalid.
     """
     try:
         text = str(exc).upper()
@@ -810,7 +519,6 @@ def _is_invalid_message_error(exc) -> bool:
 
 
 async def save_panel_ref(chat_id, message_id, status="active"):
-    """Persist {chat_id, message_id, status, timestamps} for the panel."""
     if chat_id is None or message_id is None:
         return
     coll = panel_collection()
@@ -860,20 +568,15 @@ async def mark_panel_ref_stale():
 
 async def recreate_panel(client, chat_id, page="live"):
     """
-    Create a fresh backup panel after the previous one became invalid.
-    Protected by PANEL_LOCK so concurrent update tasks create at most
-    one replacement. Persists the new reference and updates runtime state.
+    Create a fresh panel after the previous one became invalid.
+    Protected by PANEL_LOCK so at most one recreation happens.
     """
     if client is None or chat_id is None:
-        logger.warning(
-            "[BACKUP] Cannot recreate panel — missing client or chat_id"
-        )
+        logger.warning("[BACKUP] Cannot recreate panel — missing client or chat_id")
         return None
 
     async with PANEL_LOCK:
-        logger.info(
-            "[BACKUP] Backup panel message invalid; recreating panel"
-        )
+        logger.info("[BACKUP] Backup panel message invalid; recreating panel")
 
         try:
             if page == "history":
@@ -892,13 +595,10 @@ async def recreate_panel(client, chat_id, page="live"):
 
             new_id = getattr(sent, "id", None)
             if not new_id:
-                logger.warning(
-                    "[BACKUP] Panel recreation returned no message ID"
-                )
+                logger.warning("[BACKUP] Panel recreation returned no message ID")
                 return None
 
             STATE["last_message_id"] = int(new_id)
-
             await save_panel_ref(int(chat_id), int(new_id), status="active")
 
             ACTIVE_PANELS[int(new_id)] = {
@@ -911,16 +611,13 @@ async def recreate_panel(client, chat_id, page="live"):
             logger.info(
                 "[BACKUP] Backup panel recreated successfully: "
                 "chat_id=%s, message_id=%s",
-                chat_id,
-                new_id,
+                chat_id, new_id,
             )
             return sent
 
         except FloodWait as exc:
             wait = max(1, int(getattr(exc, "value", 30)))
-            logger.warning(
-                "[BACKUP] FloodWait %ss during panel recreation", wait
-            )
+            logger.warning("[BACKUP] FloodWait %ss during panel recreation", wait)
             await asyncio.sleep(wait + 2)
             return None
 
@@ -930,17 +627,12 @@ async def recreate_panel(client, chat_id, page="live"):
 
 
 async def restore_panel_ref(client):
-    """
-    Load the persisted panel reference on startup and resume it.
-    If unusable, mark it stale so the next updater recreates it.
-    """
     ref = await load_panel_ref()
     if not ref:
         return None
 
     chat_id = ref.get("chat_id")
     message_id = ref.get("message_id")
-
     if chat_id is None or message_id is None:
         return None
 
@@ -960,11 +652,9 @@ async def restore_panel_ref(client):
             return None
 
         open_panel(message, "live")
-
         logger.info(
             "[BACKUP] Restored panel: chat_id=%s message_id=%s",
-            chat_id,
-            message_id,
+            chat_id, message_id,
         )
         return message
 
@@ -985,13 +675,10 @@ async def restore_panel_ref(client):
 
 async def _edit_panel_message(message, text, keyboard=None):
     """
-    Edit the panel message with built-in FloodWait retry.
-
+    Edit panel with built-in FloodWait retry.
     Returns (success, invalid).
-    `invalid=True` means the stored message ID is stale — the panel
-    MUST be recreated and the same message ID MUST NOT be retried.
     """
-    for attempt in range(3):
+    for _ in range(3):
         try:
             await message.edit_text(
                 text,
@@ -1002,9 +689,7 @@ async def _edit_panel_message(message, text, keyboard=None):
 
         except FloodWait as exc:
             wait = max(1, int(getattr(exc, "value", 30)))
-            logger.warning(
-                "[BACKUP] FloodWait %ss during panel edit", wait
-            )
+            logger.warning("[BACKUP] FloodWait %ss during panel edit", wait)
             await asyncio.sleep(wait + 2)
             continue
 
@@ -1082,11 +767,7 @@ async def ensure_indexes():
 # STATE STORAGE
 # ============================================================
 
-async def get_state(
-    source_db,
-    file_id,
-):
-    """Read from the correct shard."""
+async def get_state(source_db, file_id):
     fid = str(file_id)
     idx = get_shard_for_file(source_db, fid)
     coll = state_collection(idx)
@@ -1094,20 +775,13 @@ async def get_state(
         return None
     try:
         rec = await coll.find_one(
-            {
-                "source_db": source_db,
-                "file_id": fid,
-            }
+            {"source_db": source_db, "file_id": fid}
         )
         if rec:
             return rec
-        # Fallback: search all shards
         for c in all_state_collections():
             rec = await c.find_one(
-                {
-                    "source_db": source_db,
-                    "file_id": fid,
-                }
+                {"source_db": source_db, "file_id": fid}
             )
             if rec:
                 return rec
@@ -1117,24 +791,11 @@ async def get_state(
         return None
 
 
-async def get_status(
-    source_db,
-    file_id,
-):
-    record = await get_state(
-        source_db,
-        file_id,
-    )
-
+async def get_status(source_db, file_id):
+    record = await get_state(source_db, file_id)
     if not record:
         return "PENDING"
-
-    return str(
-        record.get(
-            "status",
-            "PENDING",
-        )
-    ).upper()
+    return str(record.get("status", "PENDING")).upper()
 
 
 async def set_state(
@@ -1146,7 +807,6 @@ async def set_state(
     error=None,
     attempts=None,
 ):
-    """Write to the correct shard."""
     file_id = source_file_id(document)
     if not file_id:
         raise ValueError("Document has no file_id")
@@ -1176,10 +836,8 @@ async def set_state(
 
     if message_id is not None:
         update["$set"]["message_id"] = int(message_id)
-
     if error is not None:
         update["$set"]["last_error"] = str(error)[:4000]
-
     if attempts is not None:
         update["$set"]["attempts"] = int(attempts)
 
@@ -1190,32 +848,10 @@ async def set_state(
     )
 
 
-async def mark_uploading(
-    source_db,
-    document,
-):
-    collection = state_collection()
-
-    file_id = source_file_id(
-        document
-    )
-
-    existing = await get_state(
-        source_db,
-        file_id,
-    )
-
-    attempts = (
-        int(
-            existing.get(
-                "attempts",
-                0,
-            )
-        )
-        if existing
-        else 0
-    )
-
+async def mark_uploading(source_db, document):
+    file_id = source_file_id(document)
+    existing = await get_state(source_db, file_id)
+    attempts = int(existing.get("attempts", 0)) if existing else 0
     await set_state(
         source_db,
         document,
@@ -1224,11 +860,7 @@ async def mark_uploading(
     )
 
 
-async def mark_uploaded(
-    source_db,
-    document,
-    message_id,
-):
+async def mark_uploaded(source_db, document, message_id):
     await set_state(
         source_db,
         document,
@@ -1237,29 +869,9 @@ async def mark_uploaded(
     )
 
 
-async def mark_failed(
-    source_db,
-    document,
-    error,
-):
-    existing = await get_state(
-        source_db,
-        source_file_id(
-            document
-        ),
-    )
-
-    attempts = (
-        int(
-            existing.get(
-                "attempts",
-                0,
-            )
-        )
-        if existing
-        else 1
-    )
-
+async def mark_failed(source_db, document, error):
+    existing = await get_state(source_db, source_file_id(document))
+    attempts = int(existing.get("attempts", 0)) if existing else 1
     await set_state(
         source_db,
         document,
@@ -1288,10 +900,8 @@ async def reset_failed():
 
 async def create_run():
     collection = run_collection()
-
     if collection is None:
         return None
-
     result = await collection.insert_one(
         {
             "started_at": now(),
@@ -1302,82 +912,46 @@ async def create_run():
             "pid": os.getpid(),
         }
     )
-
     return result.inserted_id
 
 
-async def finish_run(
-    status,
-):
+async def finish_run(status):
     collection = run_collection()
-
-    run_id = STATE.get(
-        "run_id"
-    )
-
+    run_id = STATE.get("run_id")
     if collection is None or run_id is None:
         return
 
     await collection.update_one(
-        {
-            "_id": run_id,
-        },
+        {"_id": run_id},
         {
             "$set": {
                 "status": status,
                 "finished_at": now(),
-                "uploaded": STATE[
-                    "total_uploaded"
-                ],
-                "failed": STATE[
-                    "total_failed"
-                ],
-                "skipped": STATE[
-                    "total_skipped"
-                ],
-                "last_error": STATE[
-                    "last_error"
-                ],
+                "uploaded": STATE["total_uploaded"],
+                "failed": STATE["total_failed"],
+                "skipped": STATE["total_skipped"],
+                "last_error": STATE["last_error"],
             }
         },
     )
 
 
-async def get_history(
-    limit=12,
-):
+async def get_history(limit=12):
     collection = run_collection()
-
     if collection is None:
         return []
-
-    cursor = collection.find(
-        {}
-    ).sort(
-        "started_at",
-        -1,
-    ).limit(
-        int(limit)
-    )
-
-    return await cursor.to_list(
-        length=int(limit)
-    )
+    cursor = collection.find({}).sort("started_at", -1).limit(int(limit))
+    return await cursor.to_list(length=int(limit))
 
 
 # ============================================================
 # COUNTS
 # ============================================================
 
-async def count_state(
-    source_db=None,
-    status=None,
-):
+async def count_state(source_db=None, status=None):
     query = {}
-
     if source_db:
         query["source_db"] = source_db
-
     if status:
         query["status"] = str(status).upper()
 
@@ -1389,21 +963,13 @@ async def count_state(
             pass
     return total
 
-async def source_count(
-    source_db,
-    database,
-):
-    collection = source_collection(
-        database
-    )
 
+async def source_count(source_db, database):
+    collection = source_collection(database)
     if collection is None:
         return 0
-
     try:
-        return await collection.count_documents(
-            {}
-        )
+        return await collection.count_documents({})
     except Exception:
         return 0
 
@@ -1411,40 +977,14 @@ async def source_count(
 async def database_snapshot():
     snapshot = {}
 
-    for (
-        source_db,
-        database,
-        number,
-    ) in enabled_source_databases():
+    for source_db, database, number in enabled_source_databases():
+        total     = await source_count(source_db, database)
+        uploaded  = await count_state(source_db, "UPLOADED")
+        uploading = await count_state(source_db, "UPLOADING")
+        failed    = await count_state(source_db, "FAILED")
+        pending   = max(0, total - uploaded)
 
-        total = await source_count(
-            source_db,
-            database,
-        )
-
-        uploaded = await count_state(
-            source_db,
-            "UPLOADED",
-        )
-
-        uploading = await count_state(
-            source_db,
-            "UPLOADING",
-        )
-
-        failed = await count_state(
-            source_db,
-            "FAILED",
-        )
-
-        pending = max(
-            0,
-            total - uploaded,
-        )
-
-        snapshot[
-            source_db
-        ] = {
+        snapshot[source_db] = {
             "number": number,
             "total": total,
             "uploaded": uploaded,
@@ -1458,143 +998,128 @@ async def database_snapshot():
 
 async def total_pending():
     snapshot = await database_snapshot()
+    return sum(item["pending"] for item in snapshot.values())
 
-    return sum(
-        item["pending"]
-        for item in snapshot.values()
+
+# ============================================================
+# FAST PERSISTENT RESUME SCANNER  🚀
+# ============================================================
+#
+# The old version queried Mongo once per 100-doc batch → 1500+
+# round-trips before the first uploadable file.
+#
+# This version pre-loads ALL uploaded file_ids for the source_db
+# in a single cursor pass, then walks the source in one go and
+# yields only the ones that are NOT uploaded yet.
+#
+# Memory: ~40 bytes per uploaded file_id.
+#   156,000 IDs  ≈  6 MB
+#   1,000,000    ≈ 40 MB
+#
+# The scanner is called once per source_db per run_backup pass
+# (Media / Media2 / Media3). The pre-loaded set is rebuilt each
+# call, so newly-uploaded files are always skipped correctly.
+#
+# ============================================================
+
+async def _load_uploaded_set(source_db):
+    """
+    Return a set() of every file_id already marked UPLOADED
+    for this source_db.
+    """
+    uploaded = set()
+
+    # Search across ALL state shards (file → shard is deterministic
+    # but the mapping isn't exposed here without walking each file).
+    for coll in all_state_collections():
+        if coll is None:
+            continue
+        try:
+            cursor = coll.find(
+                {"source_db": source_db, "status": "UPLOADED"},
+                {"file_id": 1, "_id": 0},
+            ).batch_size(BACKUP_UPLOADED_PRELOAD_BATCH)
+
+            async for record in cursor:
+                value = record.get("file_id")
+                if value is not None:
+                    uploaded.add(str(value))
+
+        except Exception:
+            logger.exception(
+                "[BACKUP] Failed to pre-load uploaded ids from a shard"
+            )
+
+    logger.info(
+        "[BACKUP] Pre-loaded %s uploaded file_ids for %s",
+        fmt_int(len(uploaded)),
+        source_db,
     )
 
+    return uploaded
 
-# ============================================================
-# PERSISTENT RESUME SCANNER
-# ============================================================
-#
-# This is deliberately state-based rather than "skip the first N".
-#
-# A numeric offset is unsafe because new documents can be inserted
-# while the backup is running.
-#
-# The durable checkpoint is:
-#
-#     source_db + file_id + UPLOADED
-#
-# ============================================================
 
-async def pending_documents(
-    database,
-    source_db,
-):
-    source = source_collection(
-        database
-    )
+async def pending_documents(database, source_db):
+    """
+    Fast resume scanner.
 
+    Loads the full UPLOADED id set ONCE, then streams the source
+    collection and yields only documents that are not yet uploaded.
+
+    Uses $natural order so the sequence is stable across runs.
+    """
+    source = source_collection(database)
     if source is None:
         return
 
-    state = state_collection()
+    STATE["preload_progress"] = f"Loading UPLOADED ids for {source_db}…"
+    uploaded = await _load_uploaded_set(source_db)
+    STATE["preload_progress"] = None
 
-    cursor = source.find(
-        {}
-    ).sort(
-        "$natural",
-        1,
-    ).batch_size(
-        100,
+    total = await source_count(source_db, database)
+    scanned = 0
+    yielded = 0
+
+    cursor = source.find({}).sort("$natural", 1).batch_size(
+        BACKUP_SCAN_BATCH
     )
 
-    batch = []
-
     async for document in cursor:
-        batch.append(
-            document
-        )
+        scanned += 1
 
-        if len(batch) >= 100:
-            async for item in pending_batch(
-                batch,
-                source_db,
-                state,
-            ):
-                yield item
-
-            batch = []
-
-    if batch:
-        async for item in pending_batch(
-            batch,
-            source_db,
-            state,
-        ):
-            yield item
-
-
-async def pending_batch(
-    documents,
-    source_db,
-    state,
-):
-    ids = []
-
-    for document in documents:
-        file_id = source_file_id(
-            document
-        )
-
-        if file_id:
-            ids.append(
-                file_id
+        if scanned % 5000 == 0:
+            STATE["preload_progress"] = (
+                f"Scanning {source_db}: "
+                f"{fmt_int(scanned)}/{fmt_int(total)} "
+                f"(skipped {fmt_int(scanned - yielded)})"
             )
 
-    if not ids:
-        return
-
-    uploaded = set()
-
-    if state is not None:
-        cursor = state.find(
-            {
-                "source_db": source_db,
-                "file_id": {
-                    "$in": ids,
-                },
-                "status": "UPLOADED",
-            },
-            {
-                "file_id": 1,
-                "_id": 0,
-            },
-        )
-
-        async for record in cursor:
-            value = record.get(
-                "file_id"
-            )
-
-            if value:
-                uploaded.add(
-                    str(value)
-                )
-
-    for document in documents:
-        file_id = source_file_id(
-            document
-        )
+        file_id = source_file_id(document)
 
         if not file_id:
             yield document
+            yielded += 1
             continue
 
         if file_id not in uploaded:
             yield document
+            yielded += 1
+
+    STATE["preload_progress"] = None
+
+    logger.info(
+        "[BACKUP] Scan complete for %s: scanned=%s yielded=%s",
+        source_db,
+        fmt_int(scanned),
+        fmt_int(yielded),
+    )
 
 
 # ============================================================
 # CRASH RECONCILIATION
 # ============================================================
 
-async def uploading_records(
-    limit=2000,
-):
+async def uploading_records(limit=2000):
     out = []
     colls = all_state_collections()
     if not colls:
@@ -1604,98 +1129,46 @@ async def uploading_records(
         try:
             cursor = coll.find(
                 {"status": "UPLOADING"}
-            ).sort(
-                "updated_at",
-                1,
-            ).limit(per)
+            ).sort("updated_at", 1).limit(per)
             recs = await cursor.to_list(length=per)
             out.extend(recs)
         except Exception:
             pass
     return out[:int(limit)]
 
-async def find_source_document(
-    source_db,
-    file_id,
-):
-    for (
-        name,
-        database,
-        number,
-    ) in enabled_source_databases():
 
+async def find_source_document(source_db, file_id):
+    for name, database, _ in enabled_source_databases():
         if name != source_db:
             continue
-
-        collection = source_collection(
-            database
-        )
-
+        collection = source_collection(database)
         if collection is None:
             return None
-
         try:
-            result = await collection.find_one(
-                {
-                    "_id": file_id,
-                }
-            )
-
+            result = await collection.find_one({"_id": file_id})
             if result is not None:
                 return result
-
-            return await collection.find_one(
-                {
-                    "_id": str(file_id),
-                }
-            )
-
+            return await collection.find_one({"_id": str(file_id)})
         except Exception:
             return None
-
     return None
 
 
-def message_has_token(
-    message,
-    token,
-):
+def message_has_token(message, token):
     if message is None:
         return False
-
-    caption = getattr(
-        message,
-        "caption",
-        None,
-    )
-
-    text = getattr(
-        message,
-        "text",
-        None,
-    )
-
-    combined = (
-        f"{caption or ''}\n"
-        f"{text or ''}"
-    )
-
+    caption = getattr(message, "caption", None)
+    text = getattr(message, "text", None)
+    combined = f"{caption or ''}\n{text or ''}"
     return token in combined
 
 
-async def reconcile_one(
-    app,
-    record,
-):
-    token = record.get(
-        "backup_token"
-    )
-
+async def reconcile_one(app, record):
+    token = record.get("backup_token")
     if not token:
         return False
 
     channel = get_backup_channel_id()
-
     if channel is None:
         return False
 
@@ -1704,65 +1177,28 @@ async def reconcile_one(
             channel,
             limit=BACKUP_RECONCILE_MESSAGES,
         ):
-            if message_has_token(
-                message,
-                token,
-            ):
-                source_db = record.get(
-                    "source_db"
-                )
+            if message_has_token(message, token):
+                source_db = record.get("source_db")
+                file_id   = record.get("file_id")
 
-                file_id = record.get(
-                    "file_id"
-                )
-
-                document = await find_source_document(
-                    source_db,
-                    file_id,
-                )
-
+                document = await find_source_document(source_db, file_id)
                 if document is None:
                     return False
 
-                await mark_uploaded(
-                    source_db,
-                    document,
-                    message.id,
-                )
-
-                STATE[
-                    "last_message_id"
-                ] = message.id
-
-                STATE[
-                    "last_success"
-                ] = now_text()
+                await mark_uploaded(source_db, document, message.id)
+                STATE["last_message_id"] = message.id
+                STATE["last_success"] = now_text()
 
                 logger.info(
                     "[BACKUP][RECONCILE] %s/%s -> message %s",
-                    source_db,
-                    file_id,
-                    message.id,
+                    source_db, file_id, message.id,
                 )
-
                 return True
 
     except FloodWait as exc:
-        await asyncio.sleep(
-            int(
-                getattr(
-                    exc,
-                    "value",
-                    30,
-                )
-            )
-            + 2
-        )
-
+        await asyncio.sleep(int(getattr(exc, "value", 30)) + 2)
     except Exception:
-        logger.exception(
-            "Reconciliation failed"
-        )
+        logger.exception("Reconciliation failed")
 
     return False
 
@@ -1772,40 +1208,21 @@ async def reconcile_interrupted():
         return 0
 
     records = await uploading_records()
-
     if not records:
         return 0
 
-    STATE[
-        "mode"
-    ] = "RECONCILING"
-
-    STATE[
-        "message"
-    ] = (
-        f"Checking {len(records):,} interrupted uploads"
-    )
+    STATE["mode"] = "RECONCILING"
+    STATE["message"] = f"Checking {len(records):,} interrupted uploads"
 
     recovered = 0
-
-    # The actual Telegram client is supplied by the worker.
-    app = STATE.get(
-        "_client"
-    )
-
+    app = STATE.get("_client")
     if app is None:
         return 0
 
     for record in records:
-        if STATE[
-            "stop_requested"
-        ]:
+        if STATE["stop_requested"]:
             break
-
-        if await reconcile_one(
-            app,
-            record,
-        ):
+        if await reconcile_one(app, record):
             recovered += 1
 
     return recovered
@@ -1815,20 +1232,9 @@ async def reconcile_interrupted():
 # BACKUP CAPTION
 # ============================================================
 
-def make_caption(
-    source_db,
-    document,
-):
-    token = backup_token(
-        source_db,
-        source_file_id(
-            document
-        ),
-    )
-
-    original = source_caption(
-        document
-    )
+def make_caption(source_db, document):
+    token = backup_token(source_db, source_file_id(document))
+    original = source_caption(document)
 
     return (
         f"{original}\n\n"
@@ -1837,82 +1243,42 @@ def make_caption(
         f"🔐 <code>{token}</code>"
     )
 
-
 # ============================================================
-# TELEGRAM UPLOAD
+# TELEGRAM UPLOAD  (enhanced error handling + FloodWait)
 # ============================================================
 
-async def upload_one(
-    app,
-    source_db,
-    document,
-):
-    file_id = source_file_id(
-        document
-    )
-
-    file_name = source_file_name(
-        document
-    )
+async def upload_one(app, source_db, document):
+    file_id   = source_file_id(document)
+    file_name = source_file_name(document)
 
     if not file_id:
-        await mark_failed(
-            source_db,
-            document,
-            "Missing file_id",
-        )
-
+        await mark_failed(source_db, document, "Missing file_id")
         return False
 
-    STATE[
-        "current_file"
-    ] = file_name
+    STATE["current_file"]      = file_name
+    STATE["current_file_id"]   = file_id
+    STATE["current_file_size"] = source_file_size(document)
+    STATE["message"]           = f"Uploading {file_name}"
 
-    STATE[
-        "current_file_id"
-    ] = file_id
+    await mark_uploading(source_db, document)
 
-    STATE[
-        "current_file_size"
-    ] = source_file_size(
-        document
-    )
-
-    token = backup_token(
-        source_db,
-        file_id,
-    )
-
-    STATE[
-        "message"
-    ] = (
-        f"Uploading {file_name}"
-    )
-
-    await mark_uploading(
-        source_db,
-        document,
-    )
-
-    caption = make_caption(
-        source_db,
-        document,
-    )
-
+    caption = make_caption(source_db, document)
     attempts = 0
 
     while attempts < BACKUP_MAX_RETRIES:
         attempts += 1
 
-        if STATE[
-            "stop_requested"
-        ]:
+        if STATE["stop_requested"]:
             return False
 
+        # Honour any active FloodWait
+        while STATE["paused"]:
+            await asyncio.sleep(1)
+            if STATE["stop_requested"]:
+                return False
+
         try:
-            STATE[
-                "mode"
-            ] = "UPLOADING"
+            STATE["mode"] = "UPLOADING"
 
             sent = await app.send_cached_media(
                 chat_id=get_backup_channel_id(),
@@ -1920,144 +1286,93 @@ async def upload_one(
                 caption=caption,
             )
 
-            message_id = getattr(
-                sent,
-                "id",
-                None,
-            )
-
+            message_id = getattr(sent, "id", None)
             if not message_id:
-                raise RuntimeError(
-                    "Telegram returned no message ID"
-                )
+                raise RuntimeError("Telegram returned no message ID")
 
-            await mark_uploaded(
-                source_db,
-                document,
-                message_id,
-            )
+            await mark_uploaded(source_db, document, message_id)
 
-            STATE[
-                "last_message_id"
-            ] = message_id
-
-            STATE[
-                "last_success"
-            ] = now_text()
-
-            STATE[
-                "last_activity"
-            ] = now_text()
-
-            STATE[
-                "message"
-            ] = (
-                f"Uploaded: {file_name}"
-            )
+            STATE["last_message_id"] = message_id
+            STATE["last_success"]    = now_text()
+            STATE["last_activity"]   = now_text()
+            STATE["message"]         = f"Uploaded: {file_name}"
 
             logger.info(
                 "[BACKUP][SUCCESS] %s | %s | message=%s",
-                source_db,
-                file_name,
-                message_id,
+                source_db, file_name, message_id,
             )
-
             return True
 
         except FloodWait as exc:
-            wait = max(
-                1,
-                int(
-                    getattr(
-                        exc,
-                        "value",
-                        30,
-                    )
-                ),
-            )
+            wait = max(1, int(getattr(exc, "value", 30)))
 
-            STATE[
-                "mode"
-            ] = "FLOOD_WAIT"
+            STATE["mode"] = "FLOOD_WAIT"
+            STATE["message"] = f"🌊 Telegram FloodWait: {wait}s"
+            STATE["flood_wait_until"] = time.time() + wait
+            STATE["last_flood_wait"] = now_text()
 
-            STATE[
-                "message"
-            ] = (
-                f"Telegram FloodWait: "
-                f"{wait}s"
-            )
+            logger.warning("[BACKUP] FloodWait %ss", wait)
 
-            logger.warning(
-                "[BACKUP] FloodWait %ss",
-                wait,
-            )
+            # Sleep in small chunks so pause/stop work
+            deadline = time.time() + wait + 2
+            while time.time() < deadline:
+                if STATE["stop_requested"]:
+                    return False
+                await asyncio.sleep(min(5, max(1, deadline - time.time())))
 
-            await asyncio.sleep(
-                wait + 2
-            )
+            STATE["flood_wait_until"] = None
+            # Don't count FloodWait against retry attempts
+            attempts -= 1
+            continue
 
         except RPCError as exc:
             error = str(exc)
-
-            STATE[
-                "last_error"
-            ] = error
-
-            logger.error(
-                "[BACKUP][RPC] %s",
-                error,
-            )
+            STATE["last_error"] = error
+            logger.error("[BACKUP][RPC] %s", error)
 
             if attempts >= BACKUP_MAX_RETRIES:
-                await mark_failed(
-                    source_db,
-                    document,
-                    error,
-                )
-
+                await mark_failed(source_db, document, error)
                 return False
 
-            await asyncio.sleep(
-                BACKUP_RETRY_DELAY
-                * min(
-                    attempts,
-                    6,
-                )
-            )
+            delay = BACKUP_RETRY_DELAY * min(attempts, 6)
+            STATE["message"] = f"RPC retry in {delay}s (attempt {attempts})"
+            await asyncio.sleep(delay)
 
         except asyncio.CancelledError:
-            # Leave UPLOADING in MongoDB.
-            # Startup reconciliation handles the crash window.
             raise
+
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            error = f"Timeout: {exc}"
+            STATE["last_error"] = error
+            logger.error("[BACKUP][TIMEOUT] %s", error)
+
+            if attempts >= BACKUP_MAX_RETRIES:
+                await mark_failed(source_db, document, error)
+                return False
+
+            await asyncio.sleep(BACKUP_RETRY_DELAY * min(attempts, 6))
+
+        except (ConnectionError, OSError) as exc:
+            error = f"Connection: {exc}"
+            STATE["last_error"] = error
+            logger.error("[BACKUP][NET] %s", error)
+
+            if attempts >= BACKUP_MAX_RETRIES:
+                await mark_failed(source_db, document, error)
+                return False
+
+            await asyncio.sleep(BACKUP_RETRY_DELAY * min(attempts, 6))
 
         except Exception as exc:
             error = str(exc)
-
-            STATE[
-                "last_error"
-            ] = error
-
-            logger.error(
-                "[BACKUP][ERROR] %s",
-                error,
-            )
+            STATE["last_error"] = error
+            logger.error("[BACKUP][ERROR] %s", error)
 
             if attempts >= BACKUP_MAX_RETRIES:
-                await mark_failed(
-                    source_db,
-                    document,
-                    error,
-                )
-
+                await mark_failed(source_db, document, error)
                 return False
 
-            await asyncio.sleep(
-                BACKUP_RETRY_DELAY
-                * min(
-                    attempts,
-                    6,
-                )
-            )
+            await asyncio.sleep(BACKUP_RETRY_DELAY * min(attempts, 6))
 
     return False
 
@@ -2066,73 +1381,27 @@ async def upload_one(
 # SINGLE DATABASE PASS
 # ============================================================
 
-async def backup_database(
-    app,
-    source_db,
-    database,
-    number,
-):
-    source = source_collection(
-        database
-    )
-
+async def backup_database(app, source_db, database, number):
+    source = source_collection(database)
     if source is None:
-        STATE[
-            "last_error"
-        ] = (
-            f"{source_db} unavailable"
-        )
+        STATE["last_error"] = f"{source_db} unavailable"
         return False
 
-    total = await source.count_documents(
-        {}
-    )
+    total            = await source.count_documents({})
+    already_uploaded = await count_state(source_db, "UPLOADED")
 
-    already_uploaded = await count_state(
-        source_db,
-        "UPLOADED",
-    )
-
-    STATE[
-        "current_db"
-    ] = source_db
-
-    STATE[
-        "current_db_number"
-    ] = number
-
-    STATE[
-        "current_source_total"
-    ] = total
-
-    STATE[
-        "current_source_index"
-    ] = 0
-
-    STATE[
-        "current_uploaded"
-    ] = 0
-
-    STATE[
-        "current_failed"
-    ] = 0
-
-    STATE[
-        "current_skipped"
-    ] = already_uploaded
-
-    STATE[
-        "message"
-    ] = (
-        f"{source_db}: "
-        f"{fmt_int(total)} source files"
-    )
+    STATE["current_db"]          = source_db
+    STATE["current_db_number"]   = number
+    STATE["current_source_total"] = total
+    STATE["current_source_index"] = 0
+    STATE["current_uploaded"]    = 0
+    STATE["current_failed"]      = 0
+    STATE["current_skipped"]     = already_uploaded
+    STATE["message"]             = f"{source_db}: {fmt_int(total)} source files"
 
     logger.info(
         "[BACKUP] START %s total=%s already_uploaded=%s",
-        source_db,
-        total,
-        already_uploaded,
+        source_db, total, already_uploaded,
     )
 
     if total == 0:
@@ -2140,142 +1409,55 @@ async def backup_database(
 
     start_time = time.monotonic()
 
-    async for document in pending_documents(
-        database,
-        source_db,
-    ):
-        if STATE[
-            "stop_requested"
-        ]:
-            STATE[
-                "mode"
-            ] = "STOPPING"
-
+    async for document in pending_documents(database, source_db):
+        if STATE["stop_requested"]:
+            STATE["mode"] = "STOPPING"
             return False
 
-        while STATE[
-            "paused"
-        ]:
-            STATE[
-                "mode"
-            ] = "PAUSED"
-
-            STATE[
-                "message"
-            ] = "Backup paused"
-
-            await asyncio.sleep(
-                1
-            )
-
-            if STATE[
-                "stop_requested"
-            ]:
+        while STATE["paused"]:
+            STATE["mode"] = "PAUSED"
+            STATE["message"] = "⏸️ Backup paused"
+            await asyncio.sleep(1)
+            if STATE["stop_requested"]:
                 return False
 
-        STATE[
-            "mode"
-        ] = "UPLOADING"
+        STATE["mode"] = "UPLOADING"
+        STATE["current_source_index"] += 1
 
-        STATE[
-            "current_source_index"
-        ] += 1
-
-        file_id = source_file_id(
-            document
-        )
-
-        status = await get_status(
-            source_db,
-            file_id,
-        )
+        file_id = source_file_id(document)
+        status  = await get_status(source_db, file_id)
 
         if status == "UPLOADED":
-            STATE[
-                "current_skipped"
-            ] += 1
-
-            STATE[
-                "total_skipped"
-            ] += 1
-
+            STATE["current_skipped"] += 1
+            STATE["total_skipped"]   += 1
             continue
 
-        success = await upload_one(
-            app,
-            source_db,
-            document,
-        )
+        success = await upload_one(app, source_db, document)
 
         if success:
-            STATE[
-                "current_uploaded"
-            ] += 1
-
-            STATE[
-                "total_uploaded"
-            ] += 1
-
+            STATE["current_uploaded"] += 1
+            STATE["total_uploaded"]   += 1
         else:
-            STATE[
-                "current_failed"
-            ] += 1
-
-            STATE[
-                "total_failed"
-            ] += 1
+            STATE["current_failed"] += 1
+            STATE["total_failed"]   += 1
 
         processed = (
-            STATE[
-                "current_uploaded"
-            ]
-            + STATE[
-                "current_failed"
-            ]
-            + STATE[
-                "current_skipped"
-            ]
+            STATE["current_uploaded"]
+            + STATE["current_failed"]
+            + STATE["current_skipped"]
         )
 
-        elapsed = max(
-            0.001,
-            time.monotonic()
-            - start_time,
-        )
+        elapsed = max(0.001, time.monotonic() - start_time)
+        STATE["speed"] = processed / elapsed
 
-        STATE[
-            "speed"
-        ] = (
-            processed / elapsed
-        )
+        remaining = max(0, total - already_uploaded - processed)
+        if STATE["speed"] > 0:
+            STATE["eta"] = remaining / STATE["speed"]
 
-        remaining = max(
-            0,
-            total
-            - already_uploaded
-            - processed,
-        )
-
-        if STATE[
-            "speed"
-        ] > 0:
-            STATE[
-                "eta"
-            ] = (
-                remaining
-                / STATE[
-                    "speed"
-                ]
-            )
-
-        STATE[
-            "last_activity"
-        ] = now_text()
+        STATE["last_activity"] = now_text()
 
         if BACKUP_UPLOAD_DELAY > 0:
-            await asyncio.sleep(
-                BACKUP_UPLOAD_DELAY
-            )
+            await asyncio.sleep(BACKUP_UPLOAD_DELAY)
 
     return True
 
@@ -2284,89 +1466,33 @@ async def backup_database(
 # FULL ORDERED BACKUP
 # ============================================================
 
-async def run_backup(
-    app,
-    retry_failed=False,
-):
+async def run_backup(app, retry_failed=False):
     global WORKER_TASK
 
     async with STATE_LOCK:
-        if STATE[
-            "running"
-        ]:
+        if STATE["running"]:
             return False
 
-        STATE[
-            "running"
-        ] = True
-
-        STATE[
-            "paused"
-        ] = False
-
-        STATE[
-            "stop_requested"
-        ] = False
-
-        STATE[
-            "mode"
-        ] = "STARTING"
-
-        STATE[
-            "started_at"
-        ] = now()
-
-        STATE[
-            "finished_at"
-        ] = None
-
-        STATE[
-            "last_error"
-        ] = None
-
-        STATE[
-            "total_uploaded"
-        ] = 0
-
-        STATE[
-            "total_failed"
-        ] = 0
-
-        STATE[
-            "total_skipped"
-        ] = 0
-
-        STATE[
-            "speed"
-        ] = 0
-
-        STATE[
-            "eta"
-        ] = None
-
-        STATE[
-            "run_id"
-        ] = None
-
-        STATE[
-            "_client"
-        ] = app
+        STATE["running"]         = True
+        STATE["paused"]          = False
+        STATE["stop_requested"]  = False
+        STATE["mode"]            = "STARTING"
+        STATE["started_at"]      = now()
+        STATE["finished_at"]     = None
+        STATE["last_error"]      = None
+        STATE["total_uploaded"]  = 0
+        STATE["total_failed"]    = 0
+        STATE["total_skipped"]   = 0
+        STATE["speed"]           = 0
+        STATE["eta"]             = None
+        STATE["run_id"]          = None
+        STATE["_client"]         = app
+        STATE["preload_progress"] = None
 
     if not backup_configured():
-        STATE[
-            "mode"
-        ] = "ERROR"
-
-        STATE[
-            "last_error"
-        ] = (
-            "BACKUP_CHANNEL_ID is missing"
-        )
-
-        STATE[
-            "running"
-        ] = False
-
+        STATE["mode"] = "ERROR"
+        STATE["last_error"] = "BACKUP_CHANNEL_ID is missing"
+        STATE["running"] = False
         return False
 
     try:
@@ -2375,411 +1501,174 @@ async def run_backup(
         if retry_failed:
             await reset_failed()
 
-        # ----------------------------------------------------
-        # FIRST: RECONCILE CRASHED UPLOADS
-        # ----------------------------------------------------
         await reconcile_interrupted()
 
-        STATE[
-            "mode"
-        ] = "RUNNING"
+        STATE["mode"] = "RUNNING"
+        STATE["run_id"] = await create_run()
 
-        STATE[
-            "run_id"
-        ] = await create_run()
-
-        logger.info(
-            "================================================"
-        )
-
-        logger.info(
-            "[BACKUP] RESUMABLE BACKUP STARTED"
-        )
-
-        logger.info(
-            "[BACKUP] ORDER: Media -> Media2 -> Media3"
-        )
-
-        logger.info(
-            "================================================"
-        )
+        logger.info("================================================")
+        logger.info("[BACKUP] RESUMABLE BACKUP STARTED")
+        logger.info("[BACKUP] ORDER: Media -> Media2 -> Media3")
+        logger.info("================================================")
 
         success = True
 
-        # ----------------------------------------------------
-        # MEDIA
-        # ----------------------------------------------------
-        for (
-            source_db,
-            database,
-            number,
-        ) in enabled_source_databases():
-
-            if STATE[
-                "stop_requested"
-            ]:
+        for source_db, database, number in enabled_source_databases():
+            if STATE["stop_requested"]:
                 success = False
                 break
 
-            success = await backup_database(
-                app,
-                source_db,
-                database,
-                number,
-            )
-
+            success = await backup_database(app, source_db, database, number)
             if not success:
                 break
 
-        if STATE[
-            "stop_requested"
-        ]:
-            STATE[
-                "mode"
-            ] = "STOPPED"
-
-            await finish_run(
-                "STOPPED"
-            )
-
+        if STATE["stop_requested"]:
+            STATE["mode"] = "STOPPED"
+            await finish_run("STOPPED")
             return False
 
         if success:
-            STATE[
-                "mode"
-            ] = "COMPLETED"
-
-            STATE[
-                "message"
-            ] = (
-                "Media → Media2 → Media3 completed"
-            )
-
-            await finish_run(
-                "COMPLETED"
-            )
-
+            STATE["mode"] = "COMPLETED"
+            STATE["message"] = "Media → Media2 → Media3 completed"
+            await finish_run("COMPLETED")
             return True
 
-        STATE[
-            "mode"
-        ] = "FAILED"
-
-        await finish_run(
-            "FAILED"
-        )
-
+        STATE["mode"] = "FAILED"
+        await finish_run("FAILED")
         return False
 
     except asyncio.CancelledError:
-        STATE[
-            "mode"
-        ] = "CANCELLED"
-
+        STATE["mode"] = "CANCELLED"
         try:
-            await finish_run(
-                "CANCELLED"
-            )
+            await finish_run("CANCELLED")
         except Exception:
             pass
-
         raise
 
     except Exception as exc:
-        STATE[
-            "mode"
-        ] = "ERROR"
-
-        STATE[
-            "last_error"
-        ] = str(exc)
-
+        STATE["mode"] = "ERROR"
+        STATE["last_error"] = str(exc)
         logger.error(
             "[BACKUP] Worker crashed:\n%s",
             traceback.format_exc(),
         )
-
         try:
-            await finish_run(
-                "ERROR"
-            )
+            await finish_run("ERROR")
         except Exception:
             pass
-
         return False
 
     finally:
-        STATE[
-            "finished_at"
-        ] = now()
-
-        STATE[
-            "running"
-        ] = False
-
-        STATE[
-            "paused"
-        ] = False
-
-        STATE[
-            "stop_requested"
-        ] = False
-
-        STATE.pop(
-            "_client",
-            None,
-        )
+        STATE["finished_at"]    = now()
+        STATE["running"]        = False
+        STATE["paused"]         = False
+        STATE["stop_requested"] = False
+        STATE["preload_progress"] = None
+        STATE.pop("_client", None)
 
 
 # ============================================================
 # NEW FILE WATCHER
 # ============================================================
-#
-# This is what makes a file uploaded/indexed NOW get backed up.
-#
-# The watcher does not rely on a one-time initial backup.
-#
-# Every few seconds:
-#
-#   source DB -> source count
-#   backup state -> uploaded count
-#
-# If a new file exists:
-#
-#   pending > 0
-#   -> resumable backup starts
-#
-# Existing uploaded files are state-skipped.
-#
-# ============================================================
 
-async def watcher_loop(
-    app,
-):
+async def watcher_loop(app):
     while True:
         try:
-            STATE[
-                "last_scan"
-            ] = now_text()
+            STATE["last_scan"] = now_text()
 
             if not backup_configured():
-                STATE[
-                    "mode"
-                ] = "NOT_CONFIGURED"
-
-                await asyncio.sleep(
-                    BACKUP_WATCH_INTERVAL
-                )
-
+                STATE["mode"] = "NOT_CONFIGURED"
+                await asyncio.sleep(BACKUP_WATCH_INTERVAL)
                 continue
 
-            if not STATE[
-                "running"
-            ]:
+            if not STATE["running"]:
                 pending = await total_pending()
 
                 if pending > 0:
-                    await start_backup(
-                        app
-                    )
-
+                    await start_backup(app)
                 else:
-                    STATE[
-                        "mode"
-                    ] = "WATCHING"
+                    STATE["mode"] = "WATCHING"
+                    STATE["message"] = "👀 Watching for newly indexed files"
 
-                    STATE[
-                        "message"
-                    ] = (
-                        "Watching for newly indexed files"
-                    )
-
-            await asyncio.sleep(
-                BACKUP_WATCH_INTERVAL
-            )
+            await asyncio.sleep(BACKUP_WATCH_INTERVAL)
 
         except asyncio.CancelledError:
             raise
 
         except Exception as exc:
-            STATE[
-                "last_error"
-            ] = str(exc)
-
-            logger.error(
-                "[BACKUP] Watcher error: %s",
-                exc,
-            )
-
-            await asyncio.sleep(
-                BACKUP_WATCH_INTERVAL
-            )
+            STATE["last_error"] = str(exc)
+            logger.error("[BACKUP] Watcher error: %s", exc)
+            await asyncio.sleep(BACKUP_WATCH_INTERVAL)
 
 
-def ensure_watcher(
-    app,
-):
+def ensure_watcher(app):
     global WATCHER_TASK
-
-    if (
-        WATCHER_TASK is None
-        or WATCHER_TASK.done()
-    ):
-        WATCHER_TASK = asyncio.create_task(
-            watcher_loop(
-                app
-            )
-        )
+    if WATCHER_TASK is None or WATCHER_TASK.done():
+        WATCHER_TASK = asyncio.create_task(watcher_loop(app))
 
 
 # ============================================================
 # CONTROL
 # ============================================================
 
-async def start_backup(
-    app,
-):
+async def start_backup(app):
     global WORKER_TASK
-
-    if (
-        WORKER_TASK is None
-        or WORKER_TASK.done()
-    ):
+    if WORKER_TASK is None or WORKER_TASK.done():
         WORKER_TASK = asyncio.create_task(
-            run_backup(
-                app,
-                retry_failed=False,
-            )
+            run_backup(app, retry_failed=False)
         )
-
         return True
-
     return False
 
 
-async def retry_failed_files(
-    app,
-):
+async def retry_failed_files(app):
     global WORKER_TASK
-
-    if (
-        WORKER_TASK is None
-        or WORKER_TASK.done()
-    ):
+    if WORKER_TASK is None or WORKER_TASK.done():
         WORKER_TASK = asyncio.create_task(
-            run_backup(
-                app,
-                retry_failed=True,
-            )
+            run_backup(app, retry_failed=True)
         )
-
         return True
-
     return False
 
 
 def pause_backup():
-    if STATE[
-        "running"
-    ]:
-        STATE[
-            "paused"
-        ] = True
-
-        STATE[
-            "message"
-        ] = "Pause requested"
-
+    if STATE["running"]:
+        STATE["paused"] = True
+        STATE["message"] = "⏸️ Pause requested"
         return True
-
     return False
 
 
 def resume_backup():
-    if STATE[
-        "paused"
-    ]:
-        STATE[
-            "paused"
-        ] = False
-
-        STATE[
-            "mode"
-        ] = "RUNNING"
-
-        STATE[
-            "message"
-        ] = "Backup resumed"
-
+    if STATE["paused"]:
+        STATE["paused"] = False
+        STATE["mode"] = "RUNNING"
+        STATE["message"] = "▶️ Backup resumed"
         return True
-
     return False
 
 
 def stop_backup():
-    if STATE[
-        "running"
-    ]:
-        STATE[
-            "stop_requested"
-        ] = True
-
-        STATE[
-            "mode"
-        ] = "STOPPING"
-
-        STATE[
-            "message"
-        ] = (
-            "Stopping safely after current operation"
-        )
-
+    if STATE["running"]:
+        STATE["stop_requested"] = True
+        STATE["mode"] = "STOPPING"
+        STATE["message"] = "⏹️ Stopping safely after current operation"
         return True
-
     return False
 
 
 # ============================================================
-# LIVE STATUS
+# LIVE SNAPSHOT
 # ============================================================
 
 async def live_snapshot():
     databases = await database_snapshot()
 
-    total_source = sum(
-        item[
-            "total"
-        ]
-        for item in databases.values()
-    )
-
-    uploaded = sum(
-        item[
-            "uploaded"
-        ]
-        for item in databases.values()
-    )
-
-    pending = sum(
-        item[
-            "pending"
-        ]
-        for item in databases.values()
-    )
-
-    failed = sum(
-        item[
-            "failed"
-        ]
-        for item in databases.values()
-    )
-
-    uploading = sum(
-        item[
-            "uploading"
-        ]
-        for item in databases.values()
-    )
+    total_source = sum(item["total"]     for item in databases.values())
+    uploaded     = sum(item["uploaded"]  for item in databases.values())
+    pending      = sum(item["pending"]   for item in databases.values())
+    failed       = sum(item["failed"]    for item in databases.values())
+    uploading    = sum(item["uploading"] for item in databases.values())
 
     return {
         "databases": databases,
@@ -2793,136 +1682,89 @@ async def live_snapshot():
 
 
 # ============================================================
-# STATUS PAGE
+# STATUS PAGE  — colorful, rich, emoji-decorated
 # ============================================================
 
 async def build_status_page():
     snapshot = await live_snapshot()
+    state    = snapshot["state"]
 
-    state = snapshot[
-        "state"
-    ]
+    total    = snapshot["total_source"]
+    uploaded = snapshot["uploaded"]
+    pending  = snapshot["pending"]
+    failed   = snapshot["failed"]
 
-    total = snapshot[
-        "total_source"
-    ]
-
-    uploaded = snapshot[
-        "uploaded"
-    ]
-
-    pending = snapshot[
-        "pending"
-    ]
-
-    failed = snapshot[
-        "failed"
-    ]
-
-    percent = (
-        uploaded
-        / total
-        * 100
-        if total
-        else 100
-    )
+    percent = (uploaded / total * 100) if total else 100
 
     runtime = 0
+    if state.get("started_at"):
+        runtime = (now() - state["started_at"]).total_seconds()
 
-    if state.get(
-        "started_at"
-    ):
-        runtime = (
-            now()
-            - state[
-                "started_at"
-            ]
-        ).total_seconds()
+    mode      = state.get("mode") or "IDLE"
+    mode_icon = status_icon(mode)
+
+    # FloodWait indicator
+    flood_until = state.get("flood_wait_until")
+    flood_line = ""
+    if flood_until and flood_until > time.time():
+        remaining = int(flood_until - time.time())
+        flood_line = (
+            f"🌊 <b>FLOODWAIT:</b> "
+            f"<code>{fmt_duration(remaining)}</code> remaining\n"
+        )
+
+    preload = state.get("preload_progress")
+    preload_line = f"🔎 <i>{html_escape(preload)}</i>\n" if preload else ""
 
     text = (
         "╔══════════════════════════════════════╗\n"
-        "║ 🗄️ <b>DOWNTOWN VILLA BACKUP CORE</b> ║\n"
+        "║  🗄️ <b>DOWNTOWN VILLA BACKUP CORE</b> 🗄️  ║\n"
         "╚══════════════════════════════════════╝\n\n"
 
-        f"{status_icon(state.get('mode'))} "
-        f"<b>{html_escape(state.get('mode'))}</b>\n"
-
-        f"📡 Channel: "
-        f"<code>{get_backup_channel_id() or 'NOT SET'}</code>\n"
-
-        f"🕒 {now_text()}\n"
-
-        f"⏱️ Runtime: "
-        f"<b>{fmt_duration(runtime)}</b>\n\n"
+        f"{mode_icon} <b>MODE:</b> <code>{html_escape(mode)}</code>\n"
+        f"📡 <b>CHANNEL:</b> <code>{get_backup_channel_id() or 'NOT SET'}</code>\n"
+        f"🕒 <b>CLOCK:</b> <code>{now_text()}</code>\n"
+        f"⏱️ <b>RUNTIME:</b> <b>{fmt_duration(runtime)}</b>\n"
+        f"🧩 <b>WORKER PID:</b> <code>{os.getpid()}</code>\n"
+        f"{flood_line}"
+        f"{preload_line}"
+        "\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📊 <b>GLOBAL BACKUP</b>\n"
+        "📊 <b>GLOBAL BACKUP PROGRESS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"📚 Source files: "
-        f"<b>{fmt_int(total)}</b>\n"
+        f"📚 <b>Source files:</b> <code>{fmt_int(total)}</code>\n"
+        f"✅ <b>Confirmed:</b>    <code>{fmt_int(uploaded)}</code>\n"
+        f"⏳ <b>Pending:</b>      <code>{fmt_int(pending)}</code>\n"
+        f"❌ <b>Failed:</b>       <code>{fmt_int(failed)}</code>\n\n"
 
-        f"✅ Confirmed: "
-        f"<b>{fmt_int(uploaded)}</b>\n"
+        f"📈 <b>Progress:</b> <b>{percent:.2f}%</b>\n"
+        f"{progress_bar(uploaded, total, 28)}\n\n"
 
-        f"⏳ Pending: "
-        f"<b>{fmt_int(pending)}</b>\n"
-
-        f"❌ Failed: "
-        f"<b>{fmt_int(failed)}</b>\n"
-
-        f"📈 Progress: "
-        f"<b>{percent:.2f}%</b>\n"
-
-        f"<code>{progress_bar(uploaded, total, 28)}</code>\n"
-
-        f"⚡ Speed: "
-        f"<b>{fmt_float(state.get('speed'), 2)}/sec</b>\n"
-
-        f"🎯 ETA: "
-        f"<b>{fmt_duration(state.get('eta')) if state.get('eta') else '—'}</b>\n\n"
+        f"⚡ <b>Speed:</b> <b>{fmt_float(state.get('speed'), 2)}/sec</b>\n"
+        f"🎯 <b>ETA:</b>   <b>{fmt_duration(state.get('eta')) if state.get('eta') else '—'}</b>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🗃️ <b>DATABASE STATUS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
-    for name in (
-        "Media",
-        "Media2",
-        "Media3",
-    ):
-        item = snapshot[
-            "databases"
-        ].get(
-            name
-        )
-
+    for name in ("Media", "Media2", "Media3"):
+        item = snapshot["databases"].get(name)
         if not item:
             continue
 
-        db_percent = (
-            item[
-                "uploaded"
-            ]
-            / item[
-                "total"
-            ]
-            * 100
-            if item[
-                "total"
-            ]
-            else 100
-        )
+        db_pct = (item["uploaded"] / item["total"] * 100) if item["total"] else 100
 
         text += (
             f"📦 <b>{name}</b>\n"
-            f"   Source    : <b>{fmt_int(item['total'])}</b>\n"
-            f"   Uploaded  : <b>{fmt_int(item['uploaded'])}</b>\n"
-            f"   Pending   : <b>{fmt_int(item['pending'])}</b>\n"
-            f"   Uploading : <b>{fmt_int(item['uploading'])}</b>\n"
-            f"   Failed    : <b>{fmt_int(item['failed'])}</b>\n"
-            f"   {progress_bar(item['uploaded'], item['total'], 18)}\n\n"
+            f"   📚 Source    : <code>{fmt_int(item['total'])}</code>\n"
+            f"   ✅ Uploaded  : <code>{fmt_int(item['uploaded'])}</code>\n"
+            f"   ⏳ Pending   : <code>{fmt_int(item['pending'])}</code>\n"
+            f"   🔄 Uploading : <code>{fmt_int(item['uploading'])}</code>\n"
+            f"   ❌ Failed    : <code>{fmt_int(item['failed'])}</code>\n"
+            f"   <b>{db_pct:.1f}%</b> {progress_bar(item['uploaded'], item['total'], 14)}\n\n"
         )
 
     text += (
@@ -2930,40 +1772,24 @@ async def build_status_page():
         "🎬 <b>CURRENT OPERATION</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"🗃️ DB: "
-        f"<b>{html_escape(state.get('current_db'))}</b>\n"
-
-        f"🎬 File: "
-        f"<code>{short(state.get('current_file'), 100)}</code>\n"
-
-        f"🆔 File ID: "
-        f"<code>{short(state.get('current_file_id'), 100)}</code>\n"
-
-        f"💾 Size: "
-        f"<b>{fmt_bytes(state.get('current_file_size'))}</b>\n"
-
-        f"📨 Telegram ID: "
-        f"<code>{state.get('last_message_id') or '-'}</code>\n"
-
-        f"💬 {short(state.get('message'), 180)}\n\n"
+        f"🗃️ <b>DB:</b> <code>{html_escape(state.get('current_db'))}</code>\n"
+        f"🎬 <b>File:</b>\n<code>{short(state.get('current_file'), 120)}</code>\n"
+        f"🆔 <b>File ID:</b>\n<code>{short(state.get('current_file_id'), 120)}</code>\n"
+        f"💾 <b>Size:</b> <b>{fmt_bytes(state.get('current_file_size'))}</b>\n"
+        f"📨 <b>Telegram ID:</b> <code>{state.get('last_message_id') or '-'}</code>\n"
+        f"💬 <i>{short(state.get('message'), 180)}</i>\n\n"
 
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🛰️ <b>WATCHER</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
 
-        f"🔄 Mode: "
-        f"<b>{html_escape(state.get('mode'))}</b>\n"
-
-        f"🕒 Last scan: "
-        f"<code>{html_escape(state.get('last_scan'))}</code>\n"
-
-        f"🧩 Worker PID: "
-        f"<code>{os.getpid()}</code>\n"
+        f"🔄 <b>Mode:</b> <code>{html_escape(state.get('mode'))}</code>\n"
+        f"🕒 <b>Last scan:</b> <code>{html_escape(state.get('last_scan'))}</code>\n"
+        f"✅ <b>Last success:</b> <code>{html_escape(state.get('last_success'))}</code>\n"
+        f"🌊 <b>Last flood wait:</b> <code>{html_escape(state.get('last_flood_wait'))}</code>\n"
     )
 
-    if state.get(
-        "last_error"
-    ):
+    if state.get("last_error"):
         text += (
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             "⚠️ <b>LAST ERROR</b>\n"
@@ -2980,45 +1806,31 @@ async def build_status_page():
 
 async def build_failure_page():
     collection = state_collection()
-
     if collection is None:
-        return (
-            "❌ Backup state collection unavailable."
-        )
+        return "❌ Backup state collection unavailable."
 
     cursor = collection.find(
-        {
-            "status": "FAILED",
-        }
-    ).sort(
-        "updated_at",
-        -1,
-    ).limit(
-        25
-    )
+        {"status": "FAILED"}
+    ).sort("updated_at", -1).limit(25)
 
-    records = await cursor.to_list(
-        length=25
-    )
+    records = await cursor.to_list(length=25)
 
     text = (
-        "❌ <b>BACKUP FAILURES</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "╔══════════════════════════════════════╗\n"
+        "║  ❌ <b>BACKUP FAILURES</b> ❌             ║\n"
+        "╚══════════════════════════════════════╝\n\n"
     )
 
     if not records:
-        return (
-            text
-            + "🟢 No failed files."
-        )
+        return text + "🟢 <b>No failed files.</b>"
 
     for item in records:
         text += (
             f"🔴 <b>{html_escape(item.get('source_db'))}</b>\n"
-            f"🎬 {short(item.get('file_name'), 90)}\n"
+            f"🎬 <i>{short(item.get('file_name'), 90)}</i>\n"
             f"🆔 <code>{short(item.get('file_id'), 90)}</code>\n"
-            f"🔁 Attempts: <b>{fmt_int(item.get('attempts', 0))}</b>\n"
-            f"⚠️ {short(item.get('last_error'), 180)}\n\n"
+            f"🔁 <b>Attempts:</b> <code>{fmt_int(item.get('attempts', 0))}</code>\n"
+            f"⚠️ <i>{short(item.get('last_error'), 180)}</i>\n\n"
         )
 
     return text[:4000]
@@ -3029,66 +1841,39 @@ async def build_failure_page():
 # ============================================================
 
 async def build_history_page():
-    records = await get_history(
-        12
-    )
+    records = await get_history(12)
 
     text = (
-        "🧾 <b>BACKUP HISTORY</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "╔══════════════════════════════════════╗\n"
+        "║  🧾 <b>BACKUP HISTORY</b> 🧾              ║\n"
+        "╚══════════════════════════════════════╝\n\n"
     )
 
     if not records:
-        return (
-            text
-            + "💤 No runs recorded."
-        )
+        return text + "💤 <i>No runs recorded.</i>"
 
     for item in records:
-        started = item.get(
-            "started_at"
-        )
+        started  = item.get("started_at")
+        finished = item.get("finished_at")
 
-        finished = item.get(
-            "finished_at"
-        )
-
-        if started:
-            started_text = started.strftime(
-                "%d %b %Y %H:%M:%S"
-            )
-        else:
-            started_text = "-"
+        started_text = started.strftime("%d %b %Y %H:%M:%S") if started else "-"
 
         duration = "running"
-
         if started and finished:
-            duration = fmt_duration(
-                (
-                    finished
-                    - started
-                ).total_seconds()
-            )
+            duration = fmt_duration((finished - started).total_seconds())
 
-        status = str(
-            item.get(
-                "status",
-                "UNKNOWN",
-            )
-        )
+        status = str(item.get("status", "UNKNOWN"))
 
         text += (
-            f"{status_icon(status)} "
-            f"<b>{html_escape(status)}</b>\n"
-            f"🕒 {started_text} UTC\n"
-            f"⏱️ {duration}\n"
-            f"✅ {fmt_int(item.get('uploaded', 0))}  "
-            f"❌ {fmt_int(item.get('failed', 0))}  "
-            f"⏭️ {fmt_int(item.get('skipped', 0))}\n\n"
+            f"{status_icon(status)} <b>{html_escape(status)}</b>\n"
+            f"🕒 <code>{started_text} UTC</code>\n"
+            f"⏱️ <b>{duration}</b>\n"
+            f"✅ <code>{fmt_int(item.get('uploaded', 0))}</code>  "
+            f"❌ <code>{fmt_int(item.get('failed', 0))}</code>  "
+            f"⏭️ <code>{fmt_int(item.get('skipped', 0))}</code>\n\n"
         )
 
     return text[:4000]
-
 
 # ============================================================
 # BUTTONS
@@ -3097,105 +1882,57 @@ async def build_history_page():
 def backup_keyboard():
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(
-                "🔄 LIVE",
-                callback_data="dtv_backup_live",
-            ),
-            InlineKeyboardButton(
-                "▶️ START",
-                callback_data="dtv_backup_start",
-            ),
+            InlineKeyboardButton("🔄 LIVE",         callback_data="dtv_backup_live"),
+            InlineKeyboardButton("▶️ START",        callback_data="dtv_backup_start"),
         ],
         [
-            InlineKeyboardButton(
-                "⏸️ PAUSE",
-                callback_data="dtv_backup_pause",
-            ),
-            InlineKeyboardButton(
-                "▶️ RESUME",
-                callback_data="dtv_backup_resume",
-            ),
+            InlineKeyboardButton("⏸️ PAUSE",        callback_data="dtv_backup_pause"),
+            InlineKeyboardButton("▶️ RESUME",       callback_data="dtv_backup_resume"),
         ],
         [
-            InlineKeyboardButton(
-                "⏹️ STOP",
-                callback_data="dtv_backup_stop",
-            ),
-            InlineKeyboardButton(
-                "🔁 RETRY FAILED",
-                callback_data="dtv_backup_retry",
-            ),
+            InlineKeyboardButton("⏹️ STOP",         callback_data="dtv_backup_stop"),
+            InlineKeyboardButton("🔁 RETRY FAILED", callback_data="dtv_backup_retry"),
         ],
         [
-            InlineKeyboardButton(
-                "❌ FAILURES",
-                callback_data="dtv_backup_failures",
-            ),
-            InlineKeyboardButton(
-                "🧾 HISTORY",
-                callback_data="dtv_backup_history",
-            ),
+            InlineKeyboardButton("❌ FAILURES",     callback_data="dtv_backup_failures"),
+            InlineKeyboardButton("🧾 HISTORY",      callback_data="dtv_backup_history"),
         ],
         [
-            InlineKeyboardButton(
-                "♻️ RECONCILE",
-                callback_data="dtv_backup_reconcile",
-            ),
-            InlineKeyboardButton(
-                "❌ CLOSE",
-                callback_data="dtv_backup_close",
-            ),
+            InlineKeyboardButton("♻️ RECONCILE",    callback_data="dtv_backup_reconcile"),
+            InlineKeyboardButton("❌ CLOSE",        callback_data="dtv_backup_close"),
         ],
     ])
 
 
 # ============================================================
-# SAFE EDIT
+# SAFE EDIT  (kept for compatibility — silently ignores stale panels)
 # ============================================================
 
-async def safe_edit(
-    message,
-    text,
-    keyboard=None,
-):
+async def safe_edit(message, text, keyboard=None):
     try:
         await message.edit_text(
             text,
             reply_markup=keyboard,
             disable_web_page_preview=True,
         )
-
         return True
 
     except RPCError as exc:
-        if "MESSAGE_NOT_MODIFIED" in str(
-            exc
-        ).upper():
+        if "MESSAGE_NOT_MODIFIED" in str(exc).upper():
             return True
-
-        logger.warning(
-            "Backup panel edit failed: %s",
-            exc,
-        )
+        logger.debug("Backup panel edit failed: %s", exc)
 
     except Exception as exc:
-        logger.warning(
-            "Backup panel edit error: %s",
-            exc,
-        )
+        logger.debug("Backup panel edit error: %s", exc)
 
     return False
 
 
 # ============================================================
-# LIVE PANEL UPDATER
+# LIVE PANEL UPDATER  (self-healing)
 # ============================================================
 
-async def live_panel_loop(
-    client,
-    message,
-    page="live",
-):
+async def live_panel_loop(client, message, page="live"):
     last_text = None
     current_message = message
 
@@ -3218,10 +1955,6 @@ async def live_panel_loop(
                 )
 
                 if invalid:
-                    # --------------------------------------------------
-                    # Panel message ID is stale. Stop editing it, delete
-                    # its runtime record, and create ONE fresh panel.
-                    # --------------------------------------------------
                     chat_id = None
                     stale_id = None
 
@@ -3267,7 +2000,6 @@ async def live_panel_loop(
                         record["closed"] = False
                         record["page"] = page
 
-                    # Adopt the new panel and keep updating it live.
                     current_message = new_message
                     last_text = text
 
@@ -3277,18 +2009,13 @@ async def live_panel_loop(
                 if success:
                     last_text = text
 
-            # The panel is live, but we don't hammer Telegram.
             await asyncio.sleep(2)
 
             record = ACTIVE_PANELS.get(current_message.id)
-
             if not record:
                 break
-
             if record.get("closed"):
                 break
-
-            # If user navigates away from LIVE, this loop stops.
             if record.get("page") != page:
                 break
 
@@ -3299,22 +2026,12 @@ async def live_panel_loop(
             logger.exception("Backup live panel error")
             await asyncio.sleep(3)
 
-def stop_panel(
-    message_id,
-):
-    record = ACTIVE_PANELS.get(
-        message_id
-    )
 
+def stop_panel(message_id):
+    record = ACTIVE_PANELS.get(message_id)
     if record:
-        record[
-            "closed"
-        ] = True
-
-        task = record.get(
-            "task"
-        )
-
+        record["closed"] = True
+        task = record.get("task")
         if task:
             try:
                 task.cancel()
@@ -3322,42 +2039,31 @@ def stop_panel(
                 pass
 
 
-def open_panel(
-    message,
-    page="live",
-):
-    stop_panel(
-        message.id
-    )
+def open_panel(message, page="live"):
+    stop_panel(message.id)
 
     task = asyncio.create_task(
         live_panel_loop(
-            STATE.get(
-                "_client"
-            ),
+            STATE.get("_client"),
             message,
             page,
         )
     )
 
-    ACTIVE_PANELS[
-        message.id
-    ] = {
+    ACTIVE_PANELS[message.id] = {
         "page": page,
         "task": task,
         "closed": False,
         "created": time.time(),
     }
 
-    # Track the latest panel message in runtime state.
     try:
         STATE["last_message_id"] = int(message.id)
     except Exception:
         pass
 
-    # Persist {chat_id, message_id} together so recovery survives restarts.
     try:
-        chat_id = int(message.chat.id)
+        chat_id    = int(message.chat.id)
         message_id = int(message.id)
 
         async def _persist():
@@ -3378,31 +2084,16 @@ def open_panel(
 # /backup — THE ONLY COMMAND
 # ============================================================
 
-@Client.on_message(
-    filters.command(
-        "backup"
-    )
-)
-async def backup_command(
-    client,
-    message,
-):
+@Client.on_message(filters.command("backup"))
+async def backup_command(client, message):
     user = message.from_user
-
-    if user is None or not is_admin(
-        user.id
-    ):
+    if user is None or not is_admin(user.id):
         return
 
-    STATE[
-        "_client"
-    ] = client
+    STATE["_client"] = client
 
     await ensure_indexes()
-
-    ensure_watcher(
-        client
-    )
+    ensure_watcher(client)
 
     text = await build_status_page()
 
@@ -3412,12 +2103,8 @@ async def backup_command(
         disable_web_page_preview=True,
     )
 
-    open_panel(
-        sent,
-        "live",
-    )
+    open_panel(sent, "live")
 
-    # Explicitly persist the newly created panel reference.
     try:
         await save_panel_ref(
             int(sent.chat.id),
@@ -3432,215 +2119,177 @@ async def backup_command(
 # CALLBACKS
 # ============================================================
 
-@Client.on_callback_query(
-    filters.regex(
-        r"^dtv_backup_"
-    )
-)
-async def backup_callback(
-    client,
-    query,
-):
+@Client.on_callback_query(filters.regex(r"^dtv_backup_"))
+async def backup_callback(client, query):
     user = query.from_user
-
-    if user is None or not is_admin(
-        user.id
-    ):
-        await query.answer(
-            "❌ Access denied",
-            show_alert=True,
-        )
+    if user is None or not is_admin(user.id):
+        await query.answer("❌ Access denied", show_alert=True)
         return
 
-    STATE[
-        "_client"
-    ] = client
-
-    data = str(
-        query.data
-    )
+    STATE["_client"] = client
+    data = str(query.data)
 
     try:
         if data == "dtv_backup_live":
-            await query.answer(
-                "🔄 Live monitoring",
-            )
+            await query.answer("🔄 Live monitoring")
 
             text = await build_status_page()
-
-            await safe_edit(
-                query.message,
-                text,
-                backup_keyboard(),
+            success, invalid = await _edit_panel_message(
+                query.message, text, backup_keyboard()
             )
 
-            open_panel(
-                query.message,
-                "live",
-            )
+            if invalid:
+                cid = None
+                try:
+                    cid = query.message.chat.id
+                except Exception:
+                    pass
+                if cid is None:
+                    ref = await load_panel_ref()
+                    if ref:
+                        cid = ref.get("chat_id")
 
+                await mark_panel_ref_stale()
+                new_msg = await recreate_panel(client, cid, "live")
+                if new_msg is not None:
+                    open_panel(new_msg, "live")
+                return
+
+            open_panel(query.message, "live")
             return
 
         if data == "dtv_backup_start":
-            started = await start_backup(
-                client
-            )
-
-            ensure_watcher(
-                client
-            )
-
+            started = await start_backup(client)
+            ensure_watcher(client)
             await query.answer(
-                "▶️ Backup started"
-                if started
-                else "🟡 Backup already running",
+                "▶️ Backup started" if started
+                else "🟡 Backup already running"
             )
-
             return
 
         if data == "dtv_backup_pause":
             changed = pause_backup()
-
             await query.answer(
-                "⏸️ Backup paused"
-                if changed
-                else "🟡 Nothing is running",
+                "⏸️ Backup paused" if changed
+                else "🟡 Nothing is running"
             )
-
             return
 
         if data == "dtv_backup_resume":
             changed = resume_backup()
-
             await query.answer(
-                "▶️ Backup resumed"
-                if changed
-                else "🟡 Backup is not paused",
+                "▶️ Backup resumed" if changed
+                else "🟡 Backup is not paused"
             )
-
             return
 
         if data == "dtv_backup_stop":
             changed = stop_backup()
-
             await query.answer(
-                "⏹️ Stop requested"
-                if changed
-                else "🟡 Nothing is running",
+                "⏹️ Stop requested" if changed
+                else "🟡 Nothing is running"
             )
-
             return
 
         if data == "dtv_backup_retry":
-            started = await retry_failed_files(
-                client
-            )
-
+            started = await retry_failed_files(client)
             await query.answer(
-                "🔁 Failed files retry started"
-                if started
-                else "🟡 Backup already running",
+                "🔁 Failed files retry started" if started
+                else "🟡 Backup already running"
             )
-
             return
 
         if data == "dtv_backup_reconcile":
-            await query.answer(
-                "♻️ Reconciliation started",
-            )
-
-            asyncio.create_task(
-                reconcile_interrupted()
-            )
-
+            await query.answer("♻️ Reconciliation started")
+            asyncio.create_task(reconcile_interrupted())
             return
 
         if data == "dtv_backup_history":
             text = await build_history_page()
-
-            await safe_edit(
-                query.message,
-                text,
-                backup_keyboard(),
+            success, invalid = await _edit_panel_message(
+                query.message, text, backup_keyboard()
             )
 
-            open_panel(
-                query.message,
-                "history",
-            )
+            if invalid:
+                cid = None
+                try:
+                    cid = query.message.chat.id
+                except Exception:
+                    pass
+                if cid is None:
+                    ref = await load_panel_ref()
+                    if ref:
+                        cid = ref.get("chat_id")
 
-            await query.answer(
-                "🧾 History",
-            )
+                await mark_panel_ref_stale()
+                new_msg = await recreate_panel(client, cid, "history")
+                if new_msg is not None:
+                    open_panel(new_msg, "history")
+                await query.answer("🧾 History (new panel)")
+                return
 
+            open_panel(query.message, "history")
+            await query.answer("🧾 History")
             return
 
         if data == "dtv_backup_failures":
             text = await build_failure_page()
-
-            await safe_edit(
-                query.message,
-                text,
-                backup_keyboard(),
+            success, invalid = await _edit_panel_message(
+                query.message, text, backup_keyboard()
             )
 
-            open_panel(
-                query.message,
-                "failures",
-            )
+            if invalid:
+                cid = None
+                try:
+                    cid = query.message.chat.id
+                except Exception:
+                    pass
+                if cid is None:
+                    ref = await load_panel_ref()
+                    if ref:
+                        cid = ref.get("chat_id")
 
-            await query.answer(
-                "❌ Failed files",
-            )
+                await mark_panel_ref_stale()
+                new_msg = await recreate_panel(client, cid, "failures")
+                if new_msg is not None:
+                    open_panel(new_msg, "failures")
+                await query.answer("❌ Failed files (new panel)")
+                return
 
+            open_panel(query.message, "failures")
+            await query.answer("❌ Failed files")
             return
 
         if data == "dtv_backup_close":
-            stop_panel(
-                query.message.id
-            )
-
-            ACTIVE_PANELS.pop(
-                query.message.id,
-                None,
-            )
-
+            stop_panel(query.message.id)
+            ACTIVE_PANELS.pop(query.message.id, None)
             await query.message.delete()
-
             return
 
     except Exception as exc:
-        logger.exception(
-            "Backup callback error"
-        )
-
+        logger.exception("Backup callback error")
         try:
-            await query.answer(
-                f"❌ {short(exc, 150)}",
-                show_alert=True,
-            )
+            await query.answer(f"❌ {short(exc, 150)}", show_alert=True)
         except Exception:
             pass
 
-
 # ============================================================
-# AUTO START
+# AUTO START / STARTUP HOOK
+# ============================================================
+#
+# Call this ONCE after the Pyrogram client is fully started:
+#
+#     from plugins.backup import initialize_backup
+#     await initialize_backup(app)
+#
+# Without this hook, /backup still works, but the panel loop and
+# the watcher only start on first /backup. With it, the panel is
+# restored from MongoDB and the watcher resumes on every restart.
+#
 # ============================================================
 
-async def initialize_backup(
-    client,
-):
-    """
-    Optional integration hook.
-
-    The watcher starts even if BACKUP_AUTO_START is false.
-    That means newly indexed files can still be detected.
-
-    If BACKUP_AUTO_START=true, an initial resumable pass starts.
-    """
-    STATE[
-        "_client"
-    ] = client
+async def initialize_backup(client):
+    STATE["_client"] = client
 
     await ensure_indexes()
 
@@ -3650,10542 +2299,19 @@ async def initialize_backup(
     except Exception:
         logger.exception("[BACKUP] Panel restore failed")
 
-    ensure_watcher(
-        client
-    )
+    ensure_watcher(client)
 
     if not BACKUP_AUTO_START:
         return
 
-    if not STATE[
-        "running"
-    ]:
-        await start_backup(
-            client
-        )
-
-
-# ============================================================
-# IMPORTANT PYROGRAM STARTUP NOTE
-# ============================================================
-#
-# In most existing Pyrogram plugin projects, the plugin is imported
-# automatically and /backup works immediately.
-#
-# For AUTO_START, if your main.py already has a startup callback,
-# call:
-#
-#     await initialize_backup(app)
-#
-# once after the client is started.
-#
-# If you do not add that startup hook:
-#
-#     /backup
-#
-# still starts the watcher and the backup manually.
-#
-# ============================================================
-# NEW FILE BEHAVIOR
-# ============================================================
-#
-# Example:
-#
-#     Media = 1,000,000
-#     Uploaded = 999,999
-#
-# Then a new file is indexed:
-#
-#     Media = 1,000,001
-#     Uploaded = 999,999
-#
-# Watcher sees:
-#
-#     pending = 2
-#
-# and starts/resumes the backup worker.
-#
-# The state lookup confirms:
-#
-#     old files -> UPLOADED -> skip
-#     new files -> no state -> upload
-#
-# Therefore the new file is not required to wait for a full
-# database re-upload.
-#
-# ============================================================
-# RESUME BEHAVIOR
-# ============================================================
-#
-# The backup NEVER uses:
-#
-#     "last index = 500000"
-#
-# as its only checkpoint.
-#
-# It uses:
-#
-#     source_db + file_id + UPLOADED
-#
-# This is important because your database can receive new files
-# while the backup is running.
-#
-# ============================================================
-# DATABASE ORDER
-# ============================================================
-#
-# The worker always processes:
-#
-#     Media
-#       ↓
-#     Media2
-#       ↓
-#     Media3
-#
-# If it stops at:
-#
-#     Media2 file 400000
-#
-# after restart:
-#
-#     Media    -> already confirmed -> skipped
-#     Media2   -> resumes from state
-#     Media3   -> waits
-#
-# ============================================================
-# NO SOURCE DOCUMENT MODIFICATION
-# ============================================================
-#
-# Media / Media2 / Media3 are READ ONLY to this plugin.
-#
-# Backup metadata is stored in:
-#
-#     <COLLECTION_NAME>_backup_state
-#
-# Run history is stored in:
-#
-#     <COLLECTION_NAME>_backup_runs
-#
-# ============================================================
-# END
-# ============================================================
-
-
-def backup_diagnostic_1(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #1.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_2(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #2.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_3(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #3.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_4(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #4.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_5(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #5.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_6(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #6.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_7(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #7.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_8(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #8.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_9(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #9.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_10(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #10.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_11(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #11.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_12(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #12.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_13(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #13.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_14(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #14.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_15(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #15.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_16(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #16.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_17(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #17.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_18(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #18.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_19(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #19.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_20(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #20.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_21(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #21.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_22(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #22.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_23(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #23.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_24(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #24.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_25(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #25.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_26(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #26.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_27(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #27.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_28(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #28.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_29(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #29.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_30(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #30.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_31(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #31.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_32(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #32.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_33(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #33.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_34(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #34.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_35(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #35.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_36(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #36.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_37(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #37.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_38(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #38.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_39(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #39.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_40(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #40.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_41(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #41.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_42(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #42.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_43(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #43.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_44(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #44.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_45(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #45.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_46(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #46.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_47(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #47.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_48(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #48.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_49(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #49.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_50(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #50.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_51(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #51.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_52(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #52.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_53(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #53.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_54(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #54.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_55(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #55.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_56(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #56.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_57(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #57.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_58(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #58.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_59(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #59.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_60(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #60.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_61(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #61.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_62(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #62.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_63(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #63.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_64(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #64.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_65(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #65.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_66(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #66.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_67(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #67.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_68(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #68.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_69(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #69.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_70(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #70.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_71(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #71.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_72(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #72.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_73(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #73.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_74(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #74.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_75(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #75.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_76(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #76.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_77(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #77.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_78(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #78.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_79(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #79.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_80(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #80.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_81(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #81.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_82(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #82.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_83(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #83.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_84(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #84.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_85(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #85.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_86(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #86.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_87(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #87.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_88(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #88.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_89(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #89.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_90(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #90.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_91(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #91.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_92(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #92.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_93(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #93.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_94(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #94.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_95(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #95.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_96(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #96.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_97(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #97.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_98(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #98.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_99(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #99.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_100(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #100.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_101(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #101.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_102(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #102.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_103(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #103.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_104(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #104.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_105(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #105.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_106(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #106.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_107(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #107.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_108(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #108.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_109(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #109.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_110(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #110.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_111(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #111.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_112(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #112.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_113(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #113.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_114(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #114.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_115(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #115.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_116(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #116.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_117(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #117.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_118(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #118.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_119(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #119.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_120(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #120.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_121(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #121.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_122(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #122.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_123(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #123.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_124(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #124.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_125(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #125.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_126(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #126.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_127(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #127.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_128(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #128.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_129(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #129.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_130(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #130.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_131(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #131.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_132(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #132.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_133(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #133.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_134(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #134.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_135(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #135.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_136(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #136.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_137(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #137.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_138(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #138.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_139(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #139.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_140(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #140.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_141(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #141.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_142(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #142.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_143(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #143.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_144(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #144.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_145(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #145.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_146(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #146.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_147(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #147.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_148(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #148.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_149(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #149.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_150(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #150.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_151(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #151.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_152(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #152.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_153(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #153.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_154(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #154.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_155(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #155.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_156(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #156.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_157(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #157.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_158(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #158.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_159(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #159.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_160(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #160.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_161(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #161.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_162(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #162.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_163(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #163.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_164(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #164.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_165(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #165.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_166(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #166.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_167(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #167.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_168(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #168.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_169(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #169.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_170(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #170.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_171(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #171.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_172(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #172.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_173(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #173.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_174(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #174.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_175(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #175.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_176(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #176.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_177(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #177.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_178(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #178.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_179(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #179.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_180(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #180.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_181(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #181.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_182(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #182.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_183(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #183.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_184(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #184.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_185(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #185.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_186(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #186.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_187(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #187.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_188(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #188.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_189(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #189.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_190(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #190.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_191(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #191.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_192(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #192.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_193(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #193.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_194(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #194.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_195(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #195.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_196(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #196.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_197(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #197.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_198(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #198.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_199(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #199.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_200(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #200.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_201(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #201.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_202(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #202.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_203(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #203.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_204(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #204.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_205(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #205.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_206(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #206.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_207(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #207.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_208(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #208.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_209(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #209.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_210(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #210.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_211(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #211.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_212(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #212.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_213(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #213.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_214(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #214.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_215(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #215.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_216(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #216.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_217(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #217.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_218(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #218.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_219(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #219.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_220(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #220.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_221(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #221.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_222(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #222.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_223(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #223.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_224(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #224.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_225(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #225.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_226(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #226.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_227(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #227.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_228(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #228.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_229(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #229.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_230(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #230.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_231(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #231.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_232(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #232.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_233(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #233.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_234(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #234.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_235(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #235.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_236(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #236.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_237(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #237.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_238(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #238.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_239(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #239.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_240(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #240.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_241(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #241.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_242(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #242.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_243(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #243.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_244(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #244.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_245(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #245.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_246(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #246.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_247(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #247.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_248(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #248.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_249(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #249.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_250(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #250.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_251(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #251.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_252(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #252.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_253(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #253.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_254(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #254.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_255(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #255.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_256(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #256.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_257(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #257.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_258(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #258.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_259(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #259.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_260(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #260.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_261(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #261.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_262(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #262.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_263(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #263.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_264(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #264.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_265(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #265.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_266(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #266.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_267(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #267.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_268(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #268.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_269(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #269.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_270(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #270.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_271(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #271.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_272(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #272.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_273(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #273.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_274(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #274.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_275(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #275.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_276(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #276.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_277(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #277.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_278(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #278.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_279(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #279.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_280(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #280.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_281(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #281.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_282(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #282.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_283(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #283.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_284(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #284.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_285(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #285.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_286(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #286.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_287(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #287.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_288(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #288.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_289(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #289.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_290(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #290.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_291(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #291.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_292(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #292.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_293(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #293.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_294(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #294.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_295(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #295.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_296(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #296.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_297(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #297.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_298(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #298.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_299(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #299.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_300(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #300.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_301(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #301.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_302(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #302.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_303(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #303.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_304(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #304.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_305(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #305.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_306(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #306.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_307(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #307.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_308(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #308.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_309(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #309.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_310(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #310.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_311(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #311.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_312(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #312.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_313(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #313.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_314(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #314.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_315(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #315.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_316(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #316.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_317(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #317.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_318(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #318.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_319(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #319.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_320(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #320.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_321(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #321.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_322(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #322.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_323(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #323.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_324(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #324.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_325(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #325.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_326(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #326.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_327(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #327.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_328(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #328.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_329(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #329.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_330(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #330.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_331(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #331.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_332(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #332.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_333(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #333.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_334(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #334.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_335(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #335.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_336(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #336.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_337(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #337.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_338(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #338.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_339(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #339.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_340(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #340.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_341(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #341.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_342(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #342.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_343(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #343.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_344(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #344.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_345(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #345.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_346(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #346.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_347(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #347.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_348(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #348.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_349(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #349.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_350(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #350.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_351(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #351.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_352(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #352.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_353(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #353.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_354(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #354.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_355(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #355.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_356(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #356.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_357(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #357.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_358(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #358.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_359(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #359.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_360(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #360.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_361(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #361.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_362(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #362.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_363(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #363.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_364(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #364.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_365(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #365.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_366(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #366.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_367(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #367.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_368(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #368.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_369(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #369.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_370(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #370.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_371(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #371.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_372(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #372.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_373(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #373.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_374(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #374.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_375(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #375.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_376(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #376.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_377(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #377.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_378(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #378.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_379(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #379.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_380(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #380.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_381(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #381.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_382(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #382.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_383(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #383.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_384(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #384.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_385(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #385.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_386(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #386.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_387(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #387.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_388(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #388.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_389(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #389.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_390(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #390.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_391(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #391.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_392(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #392.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_393(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #393.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_394(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #394.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_395(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #395.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_396(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #396.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_397(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #397.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_398(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #398.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_399(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #399.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_400(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #400.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_401(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #401.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_402(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #402.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_403(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #403.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_404(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #404.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_405(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #405.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_406(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #406.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_407(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #407.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_408(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #408.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_409(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #409.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_410(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #410.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_411(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #411.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_412(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #412.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_413(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #413.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_414(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #414.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_415(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #415.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_416(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #416.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_417(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #417.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_418(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #418.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_419(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #419.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_420(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #420.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_421(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #421.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_422(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #422.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_423(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #423.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_424(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #424.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_425(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #425.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_426(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #426.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_427(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #427.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_428(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #428.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_429(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #429.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_430(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #430.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_431(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #431.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_432(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #432.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_433(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #433.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_434(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #434.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_435(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #435.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_436(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #436.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_437(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #437.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_438(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #438.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_439(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #439.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_440(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #440.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_441(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #441.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_442(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #442.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_443(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #443.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_444(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #444.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_445(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #445.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_446(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #446.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_447(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #447.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_448(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #448.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_449(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #449.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_450(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #450.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_451(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #451.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_452(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #452.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_453(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #453.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_454(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #454.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_455(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #455.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_456(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #456.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_457(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #457.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_458(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #458.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_459(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #459.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_460(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #460.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_461(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #461.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_462(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #462.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_463(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #463.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_464(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #464.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_465(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #465.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_466(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #466.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_467(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #467.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_468(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #468.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_469(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #469.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_470(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #470.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_471(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #471.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_472(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #472.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_473(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #473.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_474(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #474.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_475(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #475.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_476(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #476.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_477(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #477.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_478(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #478.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_479(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #479.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_480(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #480.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_481(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #481.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_482(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #482.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_483(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #483.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_484(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #484.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_485(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #485.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_486(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #486.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_487(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #487.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_488(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #488.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_489(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #489.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_490(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #490.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_491(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #491.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_492(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #492.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_493(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #493.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_494(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #494.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_495(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #495.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_496(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #496.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_497(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #497.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_498(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #498.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_499(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #499.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_500(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #500.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_501(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #501.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_502(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #502.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_503(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #503.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_504(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #504.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_505(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #505.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_506(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #506.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_507(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #507.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_508(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #508.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_509(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #509.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_510(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #510.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_511(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #511.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_512(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #512.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_513(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #513.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_514(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #514.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_515(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #515.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_516(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #516.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_517(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #517.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_518(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #518.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_519(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #519.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_520(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #520.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_521(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #521.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_522(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #522.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_523(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #523.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_524(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #524.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_525(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #525.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_526(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #526.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_527(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #527.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_528(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #528.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_529(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #529.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_530(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #530.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_531(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #531.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_532(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #532.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_533(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #533.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_534(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #534.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_535(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #535.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_536(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #536.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_537(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #537.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_538(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #538.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_539(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #539.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_540(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #540.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_541(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #541.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_542(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #542.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_543(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #543.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_544(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #544.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_545(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #545.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_546(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #546.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_547(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #547.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_548(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #548.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_549(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #549.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_550(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #550.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_551(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #551.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_552(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #552.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_553(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #553.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_554(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #554.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_555(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #555.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_556(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #556.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_557(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #557.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_558(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #558.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_559(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #559.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_560(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #560.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_561(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #561.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_562(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #562.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_563(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #563.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_564(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #564.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_565(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #565.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_566(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #566.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_567(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #567.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_568(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #568.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_569(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #569.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_570(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #570.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_571(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #571.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_572(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #572.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_573(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #573.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_574(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #574.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_575(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #575.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_576(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #576.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_577(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #577.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_578(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #578.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_579(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #579.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_580(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #580.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_581(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #581.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_582(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #582.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_583(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #583.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_584(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #584.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_585(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #585.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_586(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #586.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_587(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #587.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_588(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #588.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_589(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #589.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_590(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #590.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_591(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #591.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_592(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #592.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_593(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #593.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_594(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #594.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_595(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #595.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_596(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #596.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_597(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #597.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_598(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #598.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_599(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #599.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_600(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #600.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_601(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #601.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_602(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #602.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_603(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #603.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_604(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #604.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_605(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #605.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_606(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #606.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_607(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #607.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_608(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #608.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_609(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #609.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_610(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #610.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_611(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #611.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_612(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #612.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_613(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #613.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_614(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #614.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_615(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #615.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_616(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #616.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_617(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #617.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_618(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #618.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_619(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #619.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_620(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #620.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_621(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #621.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_622(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #622.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_623(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #623.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_624(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #624.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_625(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #625.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_626(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #626.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_627(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #627.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_628(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #628.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_629(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #629.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_630(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #630.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_631(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #631.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_632(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #632.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_633(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #633.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_634(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #634.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_635(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #635.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_636(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #636.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_637(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #637.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_638(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #638.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_639(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #639.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_640(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #640.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_641(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #641.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_642(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #642.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_643(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #643.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_644(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #644.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_645(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #645.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_646(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #646.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_647(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #647.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_648(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #648.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_649(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #649.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_650(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #650.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_651(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #651.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_652(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #652.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_653(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #653.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_654(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #654.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_655(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #655.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_656(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #656.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_657(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #657.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_658(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #658.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_659(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #659.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_660(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #660.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_661(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #661.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_662(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #662.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_663(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #663.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_664(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #664.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_665(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #665.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_666(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #666.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_667(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #667.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_668(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #668.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_669(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #669.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_670(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #670.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_671(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #671.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_672(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #672.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_673(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #673.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_674(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #674.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_675(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #675.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_676(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #676.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_677(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #677.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_678(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #678.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_679(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #679.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_680(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #680.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_681(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #681.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_682(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #682.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_683(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #683.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_684(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #684.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_685(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #685.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_686(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #686.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_687(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #687.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_688(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #688.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_689(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #689.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_690(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #690.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_691(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #691.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_692(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #692.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_693(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #693.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_694(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #694.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_695(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #695.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_696(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #696.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_697(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #697.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_698(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #698.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_699(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #699.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_700(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #700.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_701(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #701.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_702(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #702.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_703(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #703.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_704(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #704.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_705(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #705.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_706(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #706.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_707(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #707.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_708(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #708.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_709(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #709.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_710(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #710.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_711(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #711.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_712(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #712.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_713(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #713.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_714(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #714.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_715(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #715.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_716(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #716.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_717(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #717.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_718(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #718.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_719(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #719.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_720(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #720.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_721(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #721.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_722(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #722.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_723(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #723.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_724(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #724.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_725(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #725.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_726(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #726.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_727(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #727.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_728(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #728.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_729(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #729.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_730(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #730.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_731(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #731.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_732(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #732.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_733(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #733.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_734(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #734.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_735(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #735.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_736(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #736.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_737(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #737.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_738(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #738.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_739(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #739.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_740(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #740.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_741(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #741.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_742(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #742.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_743(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #743.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_744(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #744.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_745(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #745.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_746(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #746.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_747(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #747.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_748(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #748.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_749(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #749.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_750(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #750.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_751(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #751.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_752(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #752.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_753(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #753.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_754(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #754.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_755(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #755.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_756(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #756.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_757(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #757.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_758(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #758.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_759(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #759.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_760(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #760.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_761(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #761.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_762(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #762.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_763(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #763.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_764(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #764.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_765(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #765.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_766(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #766.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_767(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #767.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_768(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #768.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_769(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #769.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_770(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #770.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_771(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #771.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_772(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #772.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_773(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #773.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_774(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #774.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_775(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #775.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_776(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #776.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_777(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #777.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_778(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #778.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_779(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #779.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_780(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #780.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_781(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #781.
-
-    Topic: persistent resume
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_782(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #782.
-
-    Topic: Media ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_783(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #783.
-
-    Topic: Media2 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_784(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #784.
-
-    Topic: Media3 ordering
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_785(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #785.
-
-    Topic: new-file detection
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_786(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #786.
-
-    Topic: Telegram upload
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_787(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #787.
-
-    Topic: FloodWait handling
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_788(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #788.
-
-    Topic: RPC retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_789(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #789.
-
-    Topic: crash reconciliation
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_790(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #790.
-
-    Topic: backup token
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_791(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #791.
-
-    Topic: MongoDB state
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_792(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #792.
-
-    Topic: run history
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_793(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #793.
-
-    Topic: failure retry
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_794(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #794.
-
-    Topic: live status
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_795(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #795.
-
-    Topic: live speed
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_796(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #796.
-
-    Topic: live ETA
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_797(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #797.
-
-    Topic: pause control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_798(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #798.
-
-    Topic: resume control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_799(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #799.
-
-    Topic: stop control
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
-
-
-def backup_diagnostic_800(value=None):
-    """
-    DOWNTOWN VILLA operational diagnostic #800.
-
-    Topic: watcher health
-
-    This function is intentionally side-effect free. It exists as a
-    lightweight inspection hook and does not alter Media, Media2,
-    Media3, or backup state.
-    """
-    return value
+    if not STATE["running"]:
+        await start_backup(client)
 
 
 # ============================================================
 # FULL BACKUP RESET — /reset_backup  +  RESET button
 # ============================================================
-#
-# Wipes EVERYTHING:
-#   • backup_state across ALL shards
-#   • backup_runs across ALL shards
-#   • resets in-memory counters
-#
-# After reset, the next backup run will re-upload from scratch.
-#
-# ============================================================
 
-
-# ── State counters to clear ──────────────────────────────────
 _RESETTABLE_STATE_KEYS = (
     "started_at",
     "finished_at",
@@ -14212,14 +2338,13 @@ _RESETTABLE_STATE_KEYS = (
     "last_scan",
     "run_id",
     "message",
+    "flood_wait_until",
+    "last_flood_wait",
+    "preload_progress",
 )
 
 
 async def reset_all_backup_state():
-    """
-    Wipe all backup state + run history across every shard.
-    Returns dict with per-shard deleted counts.
-    """
     result = {
         "state_total": 0,
         "runs_total": 0,
@@ -14228,7 +2353,6 @@ async def reset_all_backup_state():
     }
 
     state_colls = all_state_collections()
-
     if not state_colls:
         result["errors"].append("No backup shards available")
         return result
@@ -14236,7 +2360,6 @@ async def reset_all_backup_state():
     for idx, coll in enumerate(state_colls):
         shard_info = {"shard": idx + 1, "state": 0, "runs": 0, "error": None}
 
-        # Delete state
         try:
             r = await coll.delete_many({})
             shard_info["state"] = r.deleted_count
@@ -14245,7 +2368,6 @@ async def reset_all_backup_state():
             shard_info["error"] = f"state: {e}"
             result["errors"].append(f"Shard {idx + 1} state: {e}")
 
-        # Delete runs on shard 0 only (runs live there)
         if idx == 0:
             try:
                 rc = run_collection()
@@ -14259,7 +2381,6 @@ async def reset_all_backup_state():
 
         result["per_shard"].append(shard_info)
 
-    # ── Reset in-memory STATE counters ──
     for key in _RESETTABLE_STATE_KEYS:
         if key in STATE:
             STATE[key] = None if key in (
@@ -14267,14 +2388,15 @@ async def reset_all_backup_state():
                 "last_activity", "last_success",
                 "last_message_id", "run_id",
                 "current_db", "current_file", "current_file_id",
+                "flood_wait_until", "last_flood_wait",
+                "preload_progress",
             ) else (
                 0 if isinstance(STATE.get(key), int) else
                 (0.0 if isinstance(STATE.get(key), float) else "")
             )
 
-    # Specific defaults
     STATE["mode"] = "IDLE"
-    STATE["message"] = "Reset complete — ready for fresh start"
+    STATE["message"] = "✅ Reset complete — ready for fresh start"
     STATE["speed"] = 0.0
     STATE["eta"] = None
     STATE["current_file_size"] = 0
@@ -14283,7 +2405,6 @@ async def reset_all_backup_state():
     return result
 
 
-# ── Confirmation prompt ───────────────────────────────────────
 def _reset_confirm_keyboard():
     return InlineKeyboardMarkup([
         [
@@ -14323,13 +2444,9 @@ def _build_reset_confirm_text():
     )
 
 
-# ── /reset_backup command ─────────────────────────────────────
-@Client.on_message(
-    filters.command("reset_backup")
-)
+@Client.on_message(filters.command("reset_backup"))
 async def reset_backup_command(client, message):
     user = message.from_user
-
     if user is None or not is_admin(user.id):
         return
 
@@ -14344,9 +2461,7 @@ async def reset_backup_command(client, message):
     )
 
 
-# ── RESET button on main panel ────────────────────────────────
 def backup_reset_button():
-    """Extra row you can add to your main keyboard."""
     return [
         InlineKeyboardButton(
             "🔄 FULL RESET",
@@ -14355,13 +2470,9 @@ def backup_reset_button():
     ]
 
 
-# ── Callback: prompt shown ────────────────────────────────────
-@Client.on_callback_query(
-    filters.regex(r"^dtv_backup_reset_prompt$")
-)
+@Client.on_callback_query(filters.regex(r"^dtv_backup_reset_prompt$"))
 async def cb_reset_prompt(client, query):
     user = query.from_user
-
     if user is None or not is_admin(user.id):
         await query.answer("❌ Access denied", show_alert=True)
         return
@@ -14370,7 +2481,7 @@ async def cb_reset_prompt(client, query):
 
     text = _build_reset_confirm_text()
 
-    await safe_edit(
+    await _edit_panel_message(
         query.message,
         text,
         _reset_confirm_keyboard(),
@@ -14379,13 +2490,9 @@ async def cb_reset_prompt(client, query):
     await query.answer("⚠️ Confirm to reset")
 
 
-# ── Callback: confirmed ───────────────────────────────────────
-@Client.on_callback_query(
-    filters.regex(r"^dtv_backup_reset_confirm$")
-)
+@Client.on_callback_query(filters.regex(r"^dtv_backup_reset_confirm$"))
 async def cb_reset_confirm(client, query):
     user = query.from_user
-
     if user is None or not is_admin(user.id):
         await query.answer("❌ Access denied", show_alert=True)
         return
@@ -14394,8 +2501,7 @@ async def cb_reset_confirm(client, query):
 
     await query.answer("🗑️ Deleting...", show_alert=False)
 
-    # Show "in progress"
-    await safe_edit(
+    await _edit_panel_message(
         query.message,
         (
             "🗑️ <b>RESETTING BACKUP STATE...</b>\n"
@@ -14407,7 +2513,6 @@ async def cb_reset_confirm(client, query):
     try:
         result = await reset_all_backup_state()
 
-        # Build result text
         lines = [
             "✅ <b>BACKUP RESET COMPLETE</b>",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -14428,7 +2533,9 @@ async def cb_reset_confirm(client, query):
                 f"<b>{fmt_int(s['runs'])}</b> runs"
             )
             if s["error"]:
-                lines.append(f"     ⚠️ <code>{html_escape(s['error'])[:120]}</code>")
+                lines.append(
+                    f"     ⚠️ <code>{html_escape(s['error'])[:120]}</code>"
+                )
 
         if result["errors"]:
             lines += [
@@ -14448,7 +2555,6 @@ async def cb_reset_confirm(client, query):
 
         final_text = "\n".join(lines)[:4000]
 
-        # Show main panel button
         kb = InlineKeyboardMarkup([
             [
                 InlineKeyboardButton(
@@ -14468,7 +2574,7 @@ async def cb_reset_confirm(client, query):
             ],
         ])
 
-        await safe_edit(query.message, final_text, kb)
+        await _edit_panel_message(query.message, final_text, kb)
 
         logger.info(
             "[BACKUP][RESET] State deleted=%s runs deleted=%s",
@@ -14478,7 +2584,7 @@ async def cb_reset_confirm(client, query):
 
     except Exception as exc:
         logger.exception("Backup reset failed")
-        await safe_edit(
+        await _edit_panel_message(
             query.message,
             (
                 "❌ <b>RESET FAILED</b>\n"
@@ -14495,13 +2601,9 @@ async def cb_reset_confirm(client, query):
         )
 
 
-# ── Callback: cancelled ───────────────────────────────────────
-@Client.on_callback_query(
-    filters.regex(r"^dtv_backup_reset_cancel$")
-)
+@Client.on_callback_query(filters.regex(r"^dtv_backup_reset_cancel$"))
 async def cb_reset_cancel(client, query):
     user = query.from_user
-
     if user is None or not is_admin(user.id):
         await query.answer("❌ Access denied", show_alert=True)
         return
@@ -14510,10 +2612,9 @@ async def cb_reset_cancel(client, query):
 
     STATE["_client"] = client
 
-    # Return to main panel
     text = await build_status_page()
 
-    await safe_edit(
+    await _edit_panel_message(
         query.message,
         text,
         backup_keyboard(),
@@ -14523,3 +2624,9 @@ async def cb_reset_cancel(client, query):
 
 
 logger.info("[BACKUP] Reset module loaded — /reset_backup")
+
+
+
+# ============================================================
+# END OF FILE
+# ============================================================
