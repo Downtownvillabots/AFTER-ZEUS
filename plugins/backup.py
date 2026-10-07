@@ -3197,6 +3197,7 @@ async def live_panel_loop(
     page="live",
 ):
     last_text = None
+    current_message = message
 
     while True:
         try:
@@ -3210,48 +3211,93 @@ async def live_panel_loop(
                 text = await build_status_page()
 
             if text != last_text:
-                await safe_edit(
-                    message,
+                success, invalid = await _edit_panel_message(
+                    current_message,
                     text,
                     backup_keyboard(),
                 )
 
-                last_text = text
+                if invalid:
+                    # --------------------------------------------------
+                    # Panel message ID is stale. Stop editing it, delete
+                    # its runtime record, and create ONE fresh panel.
+                    # --------------------------------------------------
+                    chat_id = None
+                    stale_id = None
+
+                    try:
+                        chat_id = current_message.chat.id
+                    except Exception:
+                        pass
+
+                    try:
+                        stale_id = current_message.id
+                    except Exception:
+                        pass
+
+                    if chat_id is None:
+                        ref = await load_panel_ref()
+                        if ref:
+                            chat_id = ref.get("chat_id")
+
+                    await mark_panel_ref_stale()
+
+                    new_message = await recreate_panel(client, chat_id, page)
+
+                    if new_message is None:
+                        logger.warning(
+                            "[BACKUP] Panel recreation failed; "
+                            "stopping updater for this panel"
+                        )
+                        break
+
+                    if stale_id is not None:
+                        ACTIVE_PANELS.pop(stale_id, None)
+
+                    record = ACTIVE_PANELS.get(new_message.id)
+                    if record is None:
+                        ACTIVE_PANELS[new_message.id] = {
+                            "page": page,
+                            "task": asyncio.current_task(),
+                            "closed": False,
+                            "created": time.time(),
+                        }
+                    else:
+                        record["task"] = asyncio.current_task()
+                        record["closed"] = False
+                        record["page"] = page
+
+                    # Adopt the new panel and keep updating it live.
+                    current_message = new_message
+                    last_text = text
+
+                    await asyncio.sleep(2)
+                    continue
+
+                if success:
+                    last_text = text
 
             # The panel is live, but we don't hammer Telegram.
-            await asyncio.sleep(
-                2
-            )
+            await asyncio.sleep(2)
 
-            record = ACTIVE_PANELS.get(
-                message.id
-            )
+            record = ACTIVE_PANELS.get(current_message.id)
 
             if not record:
                 break
 
-            if record.get(
-                "closed"
-            ):
+            if record.get("closed"):
                 break
 
             # If user navigates away from LIVE, this loop stops.
-            if record.get(
-                "page"
-            ) != page:
+            if record.get("page") != page:
                 break
 
         except asyncio.CancelledError:
             break
 
         except Exception:
-            logger.exception(
-                "Backup live panel error"
-            )
-            await asyncio.sleep(
-                3
-            )
-
+            logger.exception("Backup live panel error")
+            await asyncio.sleep(3)
 
 def stop_panel(
     message_id,
