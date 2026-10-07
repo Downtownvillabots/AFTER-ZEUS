@@ -1449,6 +1449,10 @@ async def backup_database(app, source_db, database, number):
 
     start_time = time.monotonic()
 
+    # rolling window: track last 30 upload timestamps
+    if "_recent_uploads" not in STATE:
+        STATE["_recent_uploads"] = []
+
     async for document in pending_documents(database, source_db):
         if STATE["stop_requested"]:
             STATE["mode"] = "STOPPING"
@@ -1481,14 +1485,37 @@ async def backup_database(app, source_db, database, number):
             STATE["current_failed"] += 1
             STATE["total_failed"]   += 1
 
-        processed = (
-            STATE["current_uploaded"]
-            + STATE["current_failed"]
-            + STATE["current_skipped"]
-        )
+        now_ts = time.monotonic()
 
-        elapsed = max(0.001, time.monotonic() - start_time)
-        STATE["speed"] = processed / elapsed
+        # Only count uploads/fails — not skips
+        if success:
+            STATE["_recent_uploads"].append(now_ts)
+            # keep only last 30 events
+            STATE["_recent_uploads"] = STATE["_recent_uploads"][-30:]
+
+        # rolling speed from real uploads
+        recent = STATE["_recent_uploads"]
+        if len(recent) >= 2:
+            span = max(0.001, recent[-1] - recent[0])
+            STATE["speed"] = (len(recent) - 1) / span
+        elif len(recent) == 1:
+            STATE["speed"] = 1 / max(1, now_ts - recent[0])
+        else:
+            STATE["speed"] = 0
+
+        # ETA from REAL speed
+        remaining = max(0, total - already_uploaded - (
+            STATE["current_uploaded"] + STATE["current_failed"]
+        ))
+        if STATE["speed"] > 0:
+            STATE["eta"] = remaining / STATE["speed"]
+        else:
+            STATE["eta"] = None
+
+        if processed > 0:
+            STATE["speed"] = processed / elapsed
+        else:
+            STATE["speed"] = 0
 
         remaining = max(0, total - already_uploaded - processed)
         if STATE["speed"] > 0:
