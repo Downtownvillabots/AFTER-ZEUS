@@ -1512,17 +1512,7 @@ async def backup_database(app, source_db, database, number):
         else:
             STATE["eta"] = None
 
-        if processed > 0:
-            STATE["speed"] = processed / elapsed
-        else:
-            STATE["speed"] = 0
-
-        remaining = max(0, total - already_uploaded - processed)
-        if STATE["speed"] > 0:
-            STATE["eta"] = remaining / STATE["speed"]
-
         STATE["last_activity"] = now_text()
-
         if BACKUP_UPLOAD_DELAY > 0:
             await asyncio.sleep(BACKUP_UPLOAD_DELAY)
 
