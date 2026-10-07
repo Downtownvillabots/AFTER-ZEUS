@@ -449,7 +449,7 @@ def _bar_text(pct, length=12):
     else:
         fill = "🟥"
 
-    empty = "⬜"
+    empty = "⬛"
     return fill * filled + empty * (length - filled)
 
 
