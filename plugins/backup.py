@@ -397,8 +397,7 @@ def short(value, length=90):
 
 def progress_bar(current, total, length=20):
     """
-    Colored emoji progress bar.
-    Color changes with progress: red → orange → yellow → green.
+    Square-block progress bar.
     """
     try:
         current = float(current)
@@ -415,23 +414,18 @@ def progress_bar(current, total, length=20):
     percent = max(0.0, min(100.0, percent))
     filled = int(length * percent / 100)
 
-    # Color by percent
     if percent >= 90:
-        fill, badge = "🟩", "✅"
-    elif percent >= 70:
-        fill, badge = "🟢", "🟢"
-    elif percent >= 40:
-        fill, badge = "🟡", "🟡"
-    elif percent >= 15:
-        fill, badge = "🟠", "🟠"
+        fill = "🟩"
+    elif percent >= 60:
+        fill = "🟨"
+    elif percent >= 30:
+        fill = "🟧"
     else:
-        fill, badge = "🔴", "🔴"
+        fill = "🟥"
 
     empty = "⬜"
     bar = fill * filled + empty * (length - filled)
-
-    return f"{badge} <code>{bar}</code> <b>{percent:.1f}%</b>"
-
+    return f"<code>{bar}</code> <b>{percent:.1f}%</b>"
 
 def status_icon(status):
     status = str(status or "").upper()
@@ -1694,183 +1688,143 @@ async def build_status_page():
     pending  = snapshot["pending"]
     failed   = snapshot["failed"]
 
-    percent = (uploaded / total * 100) if total else 100
+    percent = (uploaded / total * 100) if total else 0
 
     runtime = 0
     if state.get("started_at"):
         runtime = (now() - state["started_at"]).total_seconds()
 
-    mode      = state.get("mode") or "IDLE"
-    mode_icon = status_icon(mode)
+    mode  = state.get("mode") or "IDLE"
+    speed = float(state.get("speed") or 0)
 
-    # FloodWait indicator
-    flood_until = state.get("flood_wait_until")
+    # ── GLOBAL ETA ────────────────────────────────────────
+    # recompute from live speed for accuracy
+    if speed > 0 and pending > 0:
+        eta_seconds = int(pending / speed)
+    else:
+        eta_seconds = None
+
+    eta_txt    = fmt_duration(eta_seconds) if eta_seconds else "—"
+    finish_txt = "—"
+
+    if eta_seconds:
+        try:
+            finish_dt  = now() + timedelta(seconds=eta_seconds)
+            finish_txt = finish_dt.strftime("%H:%M:%S UTC")
+        except Exception:
+            pass
+
+    # ── FloodWait ─────────────────────────────────────────
     flood_line = ""
+    flood_until = state.get("flood_wait_until")
     if flood_until and flood_until > time.time():
         remaining = int(flood_until - time.time())
-        flood_line = (
-            f"🌊 <b>FLOODWAIT:</b> "
-            f"<code>{fmt_duration(remaining)}</code> remaining\n"
-        )
+        flood_line = f"🌊 FloodWait <code>{fmt_duration(remaining)}</code>\n"
 
+    # ── Preload ───────────────────────────────────────────
     preload = state.get("preload_progress")
     preload_line = f"🔎 <i>{html_escape(preload)}</i>\n" if preload else ""
 
+    sep = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
+
     text = (
-        "╔══════════════════════════════════════╗\n"
-        "║  🗄️ <b>DOWNTOWN VILLA BACKUP CORE</b> 🗄️  ║\n"
-        "╚══════════════════════════════════════╝\n\n"
-
-        f"{mode_icon} <b>MODE:</b> <code>{html_escape(mode)}</code>\n"
-        f"📡 <b>CHANNEL:</b> <code>{get_backup_channel_id() or 'NOT SET'}</code>\n"
-        f"🕒 <b>CLOCK:</b> <code>{now_text()}</code>\n"
-        f"⏱️ <b>RUNTIME:</b> <b>{fmt_duration(runtime)}</b>\n"
-        f"🧩 <b>WORKER PID:</b> <code>{os.getpid()}</code>\n"
-        f"{flood_line}"
+        f"🗄️ <b>DOWNTOWN VILLA BACKUP</b>\n"
+        f"{sep}\n"
+        f"{status_icon(mode)} <b>{html_escape(mode)}</b>\n"
+        f"🕒 <code>{now_text()}</code>\n"
+        f"⏱ Runtime <code>{fmt_duration(runtime)}</code>\n"
         f"{preload_line}"
-        "\n"
+        f"\n"
 
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "📊 <b>GLOBAL BACKUP PROGRESS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        # ── ETA BLOCK (top of panel, easy to read) ────────
+        f"⏳ <b>ESTIMATED TIME</b>\n"
+        f"{sep}\n"
+        f"🎯 Remaining  <b>{eta_txt}</b>\n"
+        f"🏁 Finish at  <b>{finish_txt}</b>\n"
+        f"⚡ Speed      <code>{fmt_float(speed, 2)}/s</code>\n"
+        f"{flood_line}"
+        f"\n"
 
-        f"📚 <b>Source files:</b> <code>{fmt_int(total)}</code>\n"
-        f"✅ <b>Confirmed:</b>    <code>{fmt_int(uploaded)}</code>\n"
-        f"⏳ <b>Pending:</b>      <code>{fmt_int(pending)}</code>\n"
-        f"❌ <b>Failed:</b>       <code>{fmt_int(failed)}</code>\n\n"
+        # ── OVERALL ───────────────────────────────────────
+        f"📊 <b>OVERALL</b>\n"
+        f"{sep}\n"
+        f"{progress_bar(uploaded, total, 20)}\n"
+        f"📚 <code>{fmt_int(total)}</code> · "
+        f"✅ <code>{fmt_int(uploaded)}</code>\n"
+        f"⏳ <code>{fmt_int(pending)}</code> · "
+        f"❌ <code>{fmt_int(failed)}</code>\n\n"
 
-        f"📈 <b>Progress:</b> <b>{percent:.2f}%</b>\n"
-        f"{progress_bar(uploaded, total, 28)}\n\n"
-
-        f"⚡ <b>Speed:</b> <b>{fmt_float(state.get('speed'), 2)}/sec</b>\n"
-        f"🎯 <b>ETA:</b>   <b>{fmt_duration(state.get('eta')) if state.get('eta') else '—'}</b>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🗃️ <b>DATABASE STATUS</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🗃 <b>DATABASES</b>\n"
+        f"{sep}\n"
     )
 
+    # ── PER-DB with its own ETA ──────────────────────────
     for name in ("Media", "Media2", "Media3"):
         item = snapshot["databases"].get(name)
         if not item:
             continue
 
-        db_pct = (item["uploaded"] / item["total"] * 100) if item["total"] else 100
+        db_total = item["total"]
+
+        if db_total == 0:
+            text += f"📦 <b>{name}</b> · <i>empty</i>\n\n"
+            continue
+
+        db_pct = item["uploaded"] / db_total * 100
+
+        # per-DB ETA from same global speed (only reflects
+        # remaining files in this DB)
+        db_eta_txt = "—"
+        if speed > 0 and item["pending"] > 0:
+            try:
+                db_eta = int(item["pending"] / speed)
+                db_eta_txt = fmt_duration(db_eta)
+            except Exception:
+                pass
 
         text += (
-            f"📦 <b>{name}</b>\n"
-            f"   📚 Source    : <code>{fmt_int(item['total'])}</code>\n"
-            f"   ✅ Uploaded  : <code>{fmt_int(item['uploaded'])}</code>\n"
-            f"   ⏳ Pending   : <code>{fmt_int(item['pending'])}</code>\n"
-            f"   🔄 Uploading : <code>{fmt_int(item['uploading'])}</code>\n"
-            f"   ❌ Failed    : <code>{fmt_int(item['failed'])}</code>\n"
-            f"   <b>{db_pct:.1f}%</b> {progress_bar(item['uploaded'], item['total'], 14)}\n\n"
+            f"📦 <b>{name}</b> · <b>{db_pct:.1f}%</b>\n"
+            f"{progress_bar(item['uploaded'], db_total, 12)}\n"
+            f"📚 <code>{fmt_int(db_total)}</code> · "
+            f"✅ <code>{fmt_int(item['uploaded'])}</code> · "
+            f"⏳ <code>{fmt_int(item['pending'])}</code>\n"
+            f"🔄 <code>{fmt_int(item['uploading'])}</code> · "
+            f"❌ <code>{fmt_int(item['failed'])}</code> · "
+            f"🎯 <b>{db_eta_txt}</b>\n\n"
         )
 
+    # ── CURRENT ───────────────────────────────────────────
+    cur_file = short(state.get("current_file"), 60)
+    cur_fid  = short(state.get("current_file_id"), 60)
+    cur_size = fmt_bytes(state.get("current_file_size"))
+    cur_db   = html_escape(state.get("current_db") or "—")
+    last_msg = state.get("last_message_id") or "—"
+
     text += (
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🎬 <b>CURRENT OPERATION</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎬 <b>CURRENT FILE</b>\n"
+        f"{sep}\n"
+        f"🗃 <code>{cur_db}</code>\n"
+        f"📄 <code>{cur_file}</code>\n"
+        f"🆔 <code>{cur_fid}</code>\n"
+        f"💾 <b>{cur_size}</b> · "
+        f"📨 <code>{last_msg}</code>\n\n"
 
-        f"🗃️ <b>DB:</b> <code>{html_escape(state.get('current_db'))}</code>\n"
-        f"🎬 <b>File:</b>\n<code>{short(state.get('current_file'), 120)}</code>\n"
-        f"🆔 <b>File ID:</b>\n<code>{short(state.get('current_file_id'), 120)}</code>\n"
-        f"💾 <b>Size:</b> <b>{fmt_bytes(state.get('current_file_size'))}</b>\n"
-        f"📨 <b>Telegram ID:</b> <code>{state.get('last_message_id') or '-'}</code>\n"
-        f"💬 <i>{short(state.get('message'), 180)}</i>\n\n"
-
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🛰️ <b>WATCHER</b>\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
-        f"🔄 <b>Mode:</b> <code>{html_escape(state.get('mode'))}</code>\n"
-        f"🕒 <b>Last scan:</b> <code>{html_escape(state.get('last_scan'))}</code>\n"
-        f"✅ <b>Last success:</b> <code>{html_escape(state.get('last_success'))}</code>\n"
-        f"🌊 <b>Last flood wait:</b> <code>{html_escape(state.get('last_flood_wait'))}</code>\n"
+        f"🛰 <b>WATCHER</b>\n"
+        f"{sep}\n"
+        f"🔄 <code>{html_escape(mode)}</code>\n"
+        f"👁 <code>{html_escape(state.get('last_scan') or '—')}</code>\n"
+        f"✅ <code>{html_escape(state.get('last_success') or '—')}</code>\n"
     )
+
+    last_fw = state.get("last_flood_wait")
+    if last_fw:
+        text += f"🌊 <code>{html_escape(last_fw)}</code>\n"
 
     if state.get("last_error"):
         text += (
-            "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            "⚠️ <b>LAST ERROR</b>\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<code>{short(state.get('last_error'), 700)}</code>\n"
-        )
-
-    return text[:4000]
-
-
-# ============================================================
-# FAILURE PAGE
-# ============================================================
-
-async def build_failure_page():
-    collection = state_collection()
-    if collection is None:
-        return "❌ Backup state collection unavailable."
-
-    cursor = collection.find(
-        {"status": "FAILED"}
-    ).sort("updated_at", -1).limit(25)
-
-    records = await cursor.to_list(length=25)
-
-    text = (
-        "╔══════════════════════════════════════╗\n"
-        "║  ❌ <b>BACKUP FAILURES</b> ❌             ║\n"
-        "╚══════════════════════════════════════╝\n\n"
-    )
-
-    if not records:
-        return text + "🟢 <b>No failed files.</b>"
-
-    for item in records:
-        text += (
-            f"🔴 <b>{html_escape(item.get('source_db'))}</b>\n"
-            f"🎬 <i>{short(item.get('file_name'), 90)}</i>\n"
-            f"🆔 <code>{short(item.get('file_id'), 90)}</code>\n"
-            f"🔁 <b>Attempts:</b> <code>{fmt_int(item.get('attempts', 0))}</code>\n"
-            f"⚠️ <i>{short(item.get('last_error'), 180)}</i>\n\n"
-        )
-
-    return text[:4000]
-
-
-# ============================================================
-# HISTORY PAGE
-# ============================================================
-
-async def build_history_page():
-    records = await get_history(12)
-
-    text = (
-        "╔══════════════════════════════════════╗\n"
-        "║  🧾 <b>BACKUP HISTORY</b> 🧾              ║\n"
-        "╚══════════════════════════════════════╝\n\n"
-    )
-
-    if not records:
-        return text + "💤 <i>No runs recorded.</i>"
-
-    for item in records:
-        started  = item.get("started_at")
-        finished = item.get("finished_at")
-
-        started_text = started.strftime("%d %b %Y %H:%M:%S") if started else "-"
-
-        duration = "running"
-        if started and finished:
-            duration = fmt_duration((finished - started).total_seconds())
-
-        status = str(item.get("status", "UNKNOWN"))
-
-        text += (
-            f"{status_icon(status)} <b>{html_escape(status)}</b>\n"
-            f"🕒 <code>{started_text} UTC</code>\n"
-            f"⏱️ <b>{duration}</b>\n"
-            f"✅ <code>{fmt_int(item.get('uploaded', 0))}</code>  "
-            f"❌ <code>{fmt_int(item.get('failed', 0))}</code>  "
-            f"⏭️ <code>{fmt_int(item.get('skipped', 0))}</code>\n\n"
+            f"\n⚠️ <b>LAST ERROR</b>\n"
+            f"{sep}\n"
+            f"<code>{short(state.get('last_error'), 220)}</code>\n"
         )
 
     return text[:4000]
