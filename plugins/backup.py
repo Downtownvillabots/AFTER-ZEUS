@@ -474,8 +474,6 @@ def _wall_time(seconds):
 
 
 def status_icon(status):
-
-def status_icon(status):
     status = str(status or "").upper()
 
     if status in {"ONLINE", "RUNNING", "UPLOADED", "COMPLETED", "CONNECTED", "ACTIVE"}:
