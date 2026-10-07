@@ -464,11 +464,22 @@ def _eta_seconds(pending, speed):
 
 
 def _wall_time(seconds):
-    """HH:MM:SS UTC from now + seconds."""
+    """
+    Human-friendly wall-clock time from now + seconds.
+    - Under 1 day  →  HH:MM:SS UTC
+    - Over 1 day   →  DD Mon YYYY · HH:MM UTC
+    """
     if not seconds:
         return "—"
     try:
-        return (now() + timedelta(seconds=int(seconds))).strftime("%H:%M:%S UTC")
+        target = now() + timedelta(seconds=int(seconds))
+
+        if seconds >= 86400:
+            # multi-day ETA — show date
+            return target.strftime("%d %b %Y · %H:%M UTC")
+        else:
+            # same-day ETA — time only
+            return target.strftime("%H:%M:%S UTC")
     except Exception:
         return "—"
 
