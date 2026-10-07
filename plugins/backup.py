@@ -243,6 +243,11 @@ BACKUP_RUN_COLLECTION = os.getenv(
     f"{COLLECTION_NAME}_backup_runs",
 )
 
+BACKUP_PANEL_COLLECTION = os.getenv(
+    "BACKUP_PANEL_COLLECTION",
+    f"{COLLECTION_NAME}_backup_panel",
+)
+
 BACKUP_TOKEN_PREFIX = os.getenv(
     "BACKUP_TOKEN_PREFIX",
     "DTV-BACKUP",
@@ -380,6 +385,14 @@ def run_collection(shard_index: int = 0):
     if db is None:
         return None
     return db[BACKUP_RUN_COLLECTION]
+
+def panel_collection():
+    """Dedicated persistent panel-state collection (shard 0)."""
+    if _backup_dbs:
+        return _backup_dbs[0][BACKUP_PANEL_COLLECTION]
+    if db is not None:
+        return db[BACKUP_PANEL_COLLECTION]
+    return None
 
 
 def get_shard_for_file(source_db: str, file_id: str) -> int:
@@ -763,6 +776,260 @@ def backup_token(
         f"{source_db}-"
         f"{digest[:32]}"
     )
+
+# ============================================================
+# PANEL MESSAGE RECOVERY
+# ============================================================
+
+def _is_invalid_message_error(exc) -> bool:
+    """
+    Return True only when the error clearly means the stored panel
+    message can no longer be edited and MUST be replaced.
+
+    We deliberately do NOT treat FloodWait or generic transient RPC
+    failures as 'invalid' — those keep their existing retry handling.
+    """
+    try:
+        text = str(exc).upper()
+    except Exception:
+        return False
+
+    markers = (
+        "MESSAGE_ID_INVALID",
+        "MESSAGEIDINVALID",
+        "MESSAGE_NOT_FOUND",
+        "MESSAGE TO EDIT NOT FOUND",
+        "MESSAGE TO BE EDITED NOT FOUND",
+        "MESSAGE_DELETE_FORBIDDEN",
+        "MESSAGE_AUTHOR_REQUIRED",
+        "CHAT_WRITE_FORBIDDEN",
+        "PEER_ID_INVALID",
+        "CHANNEL_INVALID",
+    )
+    return any(m in text for m in markers)
+
+
+async def save_panel_ref(chat_id, message_id, status="active"):
+    """Persist {chat_id, message_id, status, timestamps} for the panel."""
+    if chat_id is None or message_id is None:
+        return
+    coll = panel_collection()
+    if coll is None:
+        return
+    try:
+        await coll.update_one(
+            {"_id": "current_panel"},
+            {
+                "$set": {
+                    "chat_id": int(chat_id),
+                    "message_id": int(message_id),
+                    "updated_at": now(),
+                    "status": str(status),
+                },
+                "$setOnInsert": {"created_at": now()},
+            },
+            upsert=True,
+        )
+    except Exception:
+        logger.exception("[BACKUP] Failed to persist panel reference")
+
+
+async def load_panel_ref():
+    coll = panel_collection()
+    if coll is None:
+        return None
+    try:
+        return await coll.find_one({"_id": "current_panel"})
+    except Exception:
+        logger.exception("[BACKUP] Failed to load panel reference")
+        return None
+
+
+async def mark_panel_ref_stale():
+    coll = panel_collection()
+    if coll is None:
+        return
+    try:
+        await coll.update_one(
+            {"_id": "current_panel"},
+            {"$set": {"status": "stale", "updated_at": now()}},
+        )
+    except Exception:
+        pass
+
+
+async def recreate_panel(client, chat_id, page="live"):
+    """
+    Create a fresh backup panel after the previous one became invalid.
+    Protected by PANEL_LOCK so concurrent update tasks create at most
+    one replacement. Persists the new reference and updates runtime state.
+    """
+    if client is None or chat_id is None:
+        logger.warning(
+            "[BACKUP] Cannot recreate panel — missing client or chat_id"
+        )
+        return None
+
+    async with PANEL_LOCK:
+        logger.info(
+            "[BACKUP] Backup panel message invalid; recreating panel"
+        )
+
+        try:
+            if page == "history":
+                text = await build_history_page()
+            elif page == "failures":
+                text = await build_failure_page()
+            else:
+                text = await build_status_page()
+
+            sent = await client.send_message(
+                chat_id=int(chat_id),
+                text=text,
+                reply_markup=backup_keyboard(),
+                disable_web_page_preview=True,
+            )
+
+            new_id = getattr(sent, "id", None)
+            if not new_id:
+                logger.warning(
+                    "[BACKUP] Panel recreation returned no message ID"
+                )
+                return None
+
+            STATE["last_message_id"] = int(new_id)
+
+            await save_panel_ref(int(chat_id), int(new_id), status="active")
+
+            ACTIVE_PANELS[int(new_id)] = {
+                "page": page,
+                "task": None,
+                "closed": False,
+                "created": time.time(),
+            }
+
+            logger.info(
+                "[BACKUP] Backup panel recreated successfully: "
+                "chat_id=%s, message_id=%s",
+                chat_id,
+                new_id,
+            )
+            return sent
+
+        except FloodWait as exc:
+            wait = max(1, int(getattr(exc, "value", 30)))
+            logger.warning(
+                "[BACKUP] FloodWait %ss during panel recreation", wait
+            )
+            await asyncio.sleep(wait + 2)
+            return None
+
+        except Exception:
+            logger.exception("[BACKUP] Panel recreation failed")
+            return None
+
+
+async def restore_panel_ref(client):
+    """
+    Load the persisted panel reference on startup and resume it.
+    If unusable, mark it stale so the next updater recreates it.
+    """
+    ref = await load_panel_ref()
+    if not ref:
+        return None
+
+    chat_id = ref.get("chat_id")
+    message_id = ref.get("message_id")
+
+    if chat_id is None or message_id is None:
+        return None
+
+    try:
+        STATE["last_message_id"] = int(message_id)
+    except Exception:
+        pass
+
+    try:
+        message = await client.get_messages(
+            chat_id=int(chat_id),
+            message_ids=int(message_id),
+        )
+
+        if not message:
+            await mark_panel_ref_stale()
+            return None
+
+        open_panel(message, "live")
+
+        logger.info(
+            "[BACKUP] Restored panel: chat_id=%s message_id=%s",
+            chat_id,
+            message_id,
+        )
+        return message
+
+    except FloodWait as exc:
+        wait = max(1, int(getattr(exc, "value", 30)))
+        await asyncio.sleep(wait + 2)
+        return None
+
+    except Exception as exc:
+        logger.info(
+            "[BACKUP] Persisted panel ref unusable (%s); "
+            "will recreate on next update",
+            exc,
+        )
+        await mark_panel_ref_stale()
+        return None
+
+
+async def _edit_panel_message(message, text, keyboard=None):
+    """
+    Edit the panel message with built-in FloodWait retry.
+
+    Returns (success, invalid).
+    `invalid=True` means the stored message ID is stale — the panel
+    MUST be recreated and the same message ID MUST NOT be retried.
+    """
+    for attempt in range(3):
+        try:
+            await message.edit_text(
+                text,
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+            return True, False
+
+        except FloodWait as exc:
+            wait = max(1, int(getattr(exc, "value", 30)))
+            logger.warning(
+                "[BACKUP] FloodWait %ss during panel edit", wait
+            )
+            await asyncio.sleep(wait + 2)
+            continue
+
+        except RPCError as exc:
+            exc_str = str(exc).upper()
+            if "MESSAGE_NOT_MODIFIED" in exc_str:
+                return True, False
+            if _is_invalid_message_error(exc):
+                logger.warning(
+                    "[BACKUP] Backup panel message invalid; recreating panel"
+                )
+                return False, True
+            logger.warning("Backup panel edit failed: %s", exc)
+            return False, False
+
+        except Exception as exc:
+            if _is_invalid_message_error(exc):
+                logger.warning(
+                    "[BACKUP] Backup panel message invalid; recreating panel"
+                )
+                return False, True
+            logger.warning("Backup panel edit error: %s", exc)
+            return False, False
+
+    return False, False
 
 
 # ============================================================
@@ -3036,6 +3303,28 @@ def open_panel(
         "created": time.time(),
     }
 
+    # Track the latest panel message in runtime state.
+    try:
+        STATE["last_message_id"] = int(message.id)
+    except Exception:
+        pass
+
+    # Persist {chat_id, message_id} together so recovery survives restarts.
+    try:
+        chat_id = int(message.chat.id)
+        message_id = int(message.id)
+
+        async def _persist():
+            await save_panel_ref(chat_id, message_id, status="active")
+
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(_persist())
+        except RuntimeError:
+            pass
+    except Exception:
+        pass
+
     return task
 
 
@@ -3081,6 +3370,16 @@ async def backup_command(
         sent,
         "live",
     )
+
+    # Explicitly persist the newly created panel reference.
+    try:
+        await save_panel_ref(
+            int(sent.chat.id),
+            int(sent.id),
+            status="active",
+        )
+    except Exception:
+        pass
 
 
 # ============================================================
@@ -3293,12 +3592,17 @@ async def initialize_backup(
 
     If BACKUP_AUTO_START=true, an initial resumable pass starts.
     """
-
     STATE[
         "_client"
     ] = client
 
     await ensure_indexes()
+
+    # Resume the persisted panel reference (survives restarts).
+    try:
+        await restore_panel_ref(client)
+    except Exception:
+        logger.exception("[BACKUP] Panel restore failed")
 
     ensure_watcher(
         client
