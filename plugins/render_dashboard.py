@@ -801,15 +801,26 @@ async def build_render_page():
             f"│ 📊 Limit:    <b>{limit_gb:.2f} GB</b>\n"
         )
     else:
-        # Convert GB → MB → bytes for the small footer line
         used_mb  = bw_gb * 1024
         limit_mb = limit_gb * 1024
+        left_mb  = max(0.0, limit_mb - used_mb)
+
+        # Show MB when usage is small (< 1 GB), GB when large
+        if used_mb < 1024:
+            used_line  = f"{used_mb:.1f} MB"
+            limit_line = f"{limit_mb:.0f} MB"
+            left_line  = f"{left_mb:.1f} MB"
+        else:
+            used_line  = f"{bw_gb:.3f} GB"
+            limit_line = f"{limit_gb:.2f} GB"
+            left_line  = f"{bw_left:.3f} GB"
+
         text += (
-            f"│ {bw_badge} Used <b>{bw_gb:.3f} GB</b>\n"
-            f"│ 📊 Limit <code>{limit_gb:.2f} GB</code>\n"
-            f"│ ⏳ Left <b>{bw_left:.3f} GB</b>\n"
+            f"│ {bw_badge} Used <b>{used_line}</b>\n"
+            f"│ 📊 Limit <code>{limit_line}</code>\n"
+            f"│ ⏳ Left <b>{left_line}</b>\n"
             f"│\n"
-            f"│ {usage_bar(bw_pct, 12)} <b>{bw_pct:.1f}%</b>\n"
+            f"│ {usage_bar(bw_pct, 12)} <b>{bw_pct:.2f}%</b>\n"
             f"│ <i>{used_mb:.1f} MB / {limit_mb:.0f} MB used</i>\n"
             f"│\n"
             f"│ 💸 Overage: {over_txt}\n"
