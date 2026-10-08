@@ -719,7 +719,14 @@ async def build_render_page():
 
     # ── Bandwidth math ───────────────────────────────────
     limit_gb = bw["limit_gb"]
-    bw_gb    = bw["gb"] or 0.0
+    # Use psutil TX as the real bandwidth counter
+    # (matches what Render bills — outbound from container)
+    session_tx_bytes = sys["net_tx"]
+    session_tx_gb = session_tx_bytes / (1024 ** 3)
+
+    # If API returned more, use that. Otherwise use session TX.
+    api_gb = bw["gb"] or 0.0
+    bw_gb  = max(api_gb, session_tx_gb)
     bw_pct   = (bw_gb / limit_gb * 100) if limit_gb > 0 else 0
     bw_left  = max(0.0, limit_gb - bw_gb)
 
