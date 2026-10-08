@@ -19,6 +19,7 @@ aiofiles
 dnspython==2.7.0
 jinja2
 rapidfuzz
+psutil==5.9.8
 
 # Git-based Packages
 git+https://github.com/DreamXBotz/IMDBKit.git@main
