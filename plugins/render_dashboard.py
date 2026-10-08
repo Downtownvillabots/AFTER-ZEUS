@@ -301,13 +301,24 @@ def collect_system():
     except Exception:
         pass
 
-    try:
-        vm = psutil.virtual_memory()
-        out["ram_pct"]   = float(vm.percent)
-        out["ram_used"]  = int(vm.used)
-        out["ram_total"] = int(vm.total)
-    except Exception:
-        pass
+    out["cpu_count"] = _read_cgroup_cpu_quota()
+    
+    # Use cgroup limits for containers, fall back to psutil
+    cg_total = _read_cgroup_memory()
+    cg_used  = _read_cgroup_memory_used()
+
+    if cg_total > 0 and cg_used > 0:
+        out["ram_total"] = cg_total
+        out["ram_used"]  = cg_used
+        out["ram_pct"]   = cg_used / cg_total * 100
+    else:
+        try:
+            vm = psutil.virtual_memory()
+            out["ram_pct"]   = float(vm.percent)
+            out["ram_used"]  = int(vm.used)
+            out["ram_total"] = int(vm.total)
+        except Exception:
+            pass
 
     try:
         du = psutil.disk_usage("/")
@@ -337,6 +348,61 @@ def collect_system():
     return out
 
 
+def _read_cgroup_memory():
+    """Read memory limit from cgroup (container-aware)."""
+    try:
+        # cgroup v2
+        with open("/sys/fs/cgroup/memory.max") as f:
+            raw = f.read().strip()
+            if raw != "max":
+                return int(raw)
+    except Exception:
+        pass
+
+    try:
+        # cgroup v1
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+            val = int(f.read().strip())
+            # ignore absurdly high values (no limit set)
+            if val < (1 << 60):
+                return val
+    except Exception:
+        pass
+
+    return 0
+
+
+def _read_cgroup_memory_used():
+    """Read current memory usage from cgroup."""
+    try:
+        with open("/sys/fs/cgroup/memory.current") as f:
+            return int(f.read().strip())
+    except Exception:
+        pass
+
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f:
+            return int(f.read().strip())
+    except Exception:
+        pass
+
+    return 0
+
+
+def _read_cgroup_cpu_quota():
+    """Return effective CPU count from cgroup v2."""
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            parts = f.read().strip().split()
+            if len(parts) == 2 and parts[0] != "max":
+                quota = int(parts[0])
+                period = int(parts[1])
+                return max(1, round(quota / period))
+    except Exception:
+        pass
+    return os.cpu_count() or 1
+
+
 # ============================================================
 # RENDER API HELPERS
 # ============================================================
@@ -348,16 +414,68 @@ def _render_headers(api_key):
     }
 
 
+# Diagnostic state — last API error per account
+_LAST_API_ERROR = {"msg": None, "ts": 0.0}
+
+
 async def _render_get_json(url, api_key, timeout=10):
+    """Fetch JSON from Render, caching the last error message."""
+    # sanity checks
+    if not api_key:
+        _LAST_API_ERROR["msg"] = "API key is empty"
+        _LAST_API_ERROR["ts"] = time.time()
+        return None
+
+    if not api_key.startswith("rnd_"):
+        _LAST_API_ERROR["msg"] = (
+            f"API key does not start with 'rnd_' "
+            f"(got: {api_key[:8]}...)"
+        )
+        _LAST_API_ERROR["ts"] = time.time()
+        return None
+
     try:
         t = aiohttp.ClientTimeout(total=timeout)
         async with aiohttp.ClientSession(timeout=t) as session:
-            async with session.get(url, headers=_render_headers(api_key)) as resp:
-                if resp.status != 200:
+            async with session.get(
+                url, headers=_render_headers(api_key)
+            ) as resp:
+                if resp.status == 401:
+                    _LAST_API_ERROR["msg"] = "401 Unauthorized — API key invalid or revoked"
+                    _LAST_API_ERROR["ts"] = time.time()
                     return None
+
+                if resp.status == 403:
+                    _LAST_API_ERROR["msg"] = "403 Forbidden — API key missing scope"
+                    _LAST_API_ERROR["ts"] = time.time()
+                    return None
+
+                if resp.status == 404:
+                    _LAST_API_ERROR["msg"] = "404 Not Found — service ID wrong"
+                    _LAST_API_ERROR["ts"] = time.time()
+                    return None
+
+                if resp.status != 200:
+                    body = ""
+                    try:
+                        body = (await resp.text())[:200]
+                    except Exception:
+                        pass
+                    _LAST_API_ERROR["msg"] = (
+                        f"HTTP {resp.status} — {body or 'no body'}"
+                    )
+                    _LAST_API_ERROR["ts"] = time.time()
+                    return None
+
                 return await resp.json()
+
+    except asyncio.TimeoutError:
+        _LAST_API_ERROR["msg"] = f"Timeout after {timeout}s — network blocked"
+        _LAST_API_ERROR["ts"] = time.time()
+        return None
     except Exception as e:
-        logger.debug("[RENDER] GET %s failed: %s", url, e)
+        _LAST_API_ERROR["msg"] = f"{type(e).__name__}: {e}"
+        _LAST_API_ERROR["ts"] = time.time()
         return None
 
 
@@ -643,9 +761,19 @@ async def build_render_page():
     )
 
     if not bw["ok"]:
+        err_msg = _LAST_API_ERROR.get("msg") or "unknown error"
+
+        # Which env vars are actually set?
+        has_key = bool(_keys and _keys[0])
+        has_srv = bool(_services and _services[0])
+
         text += (
-            "│ ⚠️ <i>Render API unreachable</i>\n"
-            f"│ Plan limit <b>{limit_gb:.2f} GB</b>\n"
+            "│ ⚠️ <b>API unreachable</b>\n"
+            f"│ <code>{html_escape(err_msg)[:140]}</code>\n"
+            "│\n"
+            f"│ 🔑 Key set:  {'✅' if has_key else '❌'}\n"
+            f"│ 🆔 Svc set:  {'✅' if has_srv else '❌'}\n"
+            f"│ 📊 Limit:    <b>{limit_gb:.2f} GB</b>\n"
         )
     else:
         text += (
@@ -665,7 +793,7 @@ async def build_render_page():
         "╭─〔 ⚙️ <b>CPU</b> 〕─────────────╮\n"
         f"│ {cpu_badge} Usage <b>{sys['cpu_pct']:.1f}%</b>\n"
         f"│ {usage_bar(sys['cpu_pct'], 12)} <b>{sys['cpu_pct']:.1f}%</b>\n"
-        f"│ 🧩 Cores <code>{os.cpu_count() or 1}</code>\n"
+        f"│ 🧩 Cores <code>{sys.get('cpu_count', os.cpu_count() or 1)}</code>\n"
         "╰───────────────────────╯\n\n"
 
         # ── RAM ───────────────────────────────────────────
