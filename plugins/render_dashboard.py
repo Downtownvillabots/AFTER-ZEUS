@@ -37,6 +37,13 @@ from pyrogram.types import (
 )
 from pyrogram.errors import FloodWait, RPCError
 
+# ============================================================
+# BANDWIDTH CACHE — refresh once every 30 minutes
+# ============================================================
+
+_BW_CACHE = {}   # {service_id: {"gb": float, "ok": bool, "ts": float}}
+_BW_TTL   = 1800  # 30 minutes in seconds
+
 
 # ============================================================
 # LOGGER
@@ -493,7 +500,7 @@ async def fetch_account_metadata(account, force=False):
     now_ts = time.time()
     cache_age = now_ts - _META_CACHE["ts"]
 
-    if not force and cache_age < 300 and account.get("account_email"):
+    if not force and cache_age < _BW_TTL and account.get("account_email"):
         return
 
     api_key = account["api_key"]
@@ -551,7 +558,7 @@ async def fetch_account_metadata(account, force=False):
 
 async def _fetch_one_bandwidth(account):
     """Fetch bandwidth for a single account.
-    Returns (gb, ok)."""
+    Cached for 30 minutes. Returns (gb, ok)."""
     if not account:
         return None, False
 
@@ -560,6 +567,11 @@ async def _fetch_one_bandwidth(account):
 
     if not api_key or not service_id:
         return None, False
+
+    # ── 30-minute cache check ────────────────────────────
+    cached = _BW_CACHE.get(service_id)
+    if cached and (time.time() - cached["ts"]) < _BW_TTL:
+        return cached["gb"], cached["ok"]
 
     now_utc = datetime.utcnow()
     month_start = datetime(now_utc.year, now_utc.month, 1)
@@ -576,6 +588,11 @@ async def _fetch_one_bandwidth(account):
     )
     data = await _render_get_json(url, api_key, timeout=10)
     if data is None:
+        _BW_CACHE[service_id] = {
+            "gb": 0.0,
+            "ok": False,
+            "ts": time.time(),
+        }
         return None, False
 
     total_bytes = 0
@@ -609,8 +626,13 @@ async def _fetch_one_bandwidth(account):
     except Exception:
         return None, False
 
-    return total_bytes / (1024 ** 3), True
-
+    gb = total_bytes / (1024 ** 3)
+    _BW_CACHE[service_id] = {
+        "gb": gb,
+        "ok": True,
+        "ts": time.time(),
+    }
+    return gb, True
 
 async def fetch_bandwidth_multi():
     """
