@@ -801,12 +801,16 @@ async def build_render_page():
             f"│ 📊 Limit:    <b>{limit_gb:.2f} GB</b>\n"
         )
     else:
+        # Convert GB → MB → bytes for the small footer line
+        used_mb  = bw_gb * 1024
+        limit_mb = limit_gb * 1024
         text += (
             f"│ {bw_badge} Used <b>{bw_gb:.3f} GB</b>\n"
             f"│ 📊 Limit <code>{limit_gb:.2f} GB</code>\n"
             f"│ ⏳ Left <b>{bw_left:.3f} GB</b>\n"
             f"│\n"
             f"│ {usage_bar(bw_pct, 12)} <b>{bw_pct:.1f}%</b>\n"
+            f"│ <i>{used_mb:.1f} MB / {limit_mb:.0f} MB used</i>\n"
             f"│\n"
             f"│ 💸 Overage: {over_txt}\n"
         )
