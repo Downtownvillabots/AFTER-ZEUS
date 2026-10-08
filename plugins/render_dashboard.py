@@ -564,13 +564,16 @@ async def _fetch_one_bandwidth(account):
     now_utc = datetime.utcnow()
     month_start = datetime(now_utc.year, now_utc.month, 1)
 
+    # Render wants ISO 8601 (RFC 3339), not Unix epoch
+    start_str = month_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_str   = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+
     url = (
         "https://api.render.com/v1/metrics/bandwidth"
-        f"?startTime={int(month_start.timestamp())}"
-        f"&endTime={int(now_utc.timestamp())}"
+        f"?startTime={start_str}"
+        f"&endTime={end_str}"
         f"&resource={service_id}"
     )
-
     data = await _render_get_json(url, api_key, timeout=10)
     if data is None:
         return None, False
