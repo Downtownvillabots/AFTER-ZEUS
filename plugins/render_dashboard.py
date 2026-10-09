@@ -6,7 +6,9 @@
 #   • Which account is currently active (auto-detected)
 #   • Account email + workspace name
 #   • Service name + region + plan
-#   • Bandwidth usage vs plan limit (from Render API)
+#   • Bandwidth usage vs plan limit
+#       (measured by psutil TX, persisted to MongoDB,
+#        survives redeploys, resets every month)
 #   • CPU / RAM / Disk  (from psutil, real-time)
 #   • Network TX / RX rates
 #   • Uptime + health
@@ -14,8 +16,6 @@
 # Colors go GREEN → YELLOW → ORANGE → RED as usage grows.
 # Multi-account: tries each configured pair in order, uses the
 # first one that responds. Remembers the working one.
-#
-# Bandwidth is persisted to MongoDB so it survives redeploys.
 #
 # ============================================================
 
@@ -49,15 +49,21 @@ logger.setLevel(logging.INFO)
 
 
 # ============================================================
-# BANDWIDTH CACHE — refresh once every 30 minutes
+# PERSISTENT BANDWIDTH STORAGE
 # ============================================================
-
-_BW_CACHE = {}   # {service_id: {"gb": float, "ok": bool, "ts": float}}
-_BW_TTL   = 1800  # 30 minutes in seconds
-
-
-# ============================================================
-# PERSISTENT BANDWIDTH STORAGE (survives redeploys)
+#
+# We do NOT use Render's metrics API for bandwidth.
+# Instead we:
+#   1. Read psutil.net_io_counters().bytes_sent on every refresh
+#   2. Compute the delta since the last save
+#   3. Add the delta to a running monthly total in MongoDB
+#   4. On container restart (psutil resets to 0), keep adding
+#      from where we left off
+#   5. New month → fresh counter
+#
+# Render counts OUTBOUND (TX) as billable bandwidth.
+# RX is incoming, tracked for display only.
+#
 # ============================================================
 
 try:
@@ -66,6 +72,8 @@ except Exception:
     _main_db = None
 
 _BW_PERSIST_COLLECTION = "Telegram_files_render_bw"
+_BW_SAVE_INTERVAL      = 60   # save to Mongo at most once per minute
+_BW_STATE              = {"last_save_ts": 0.0}
 
 
 def _bw_coll():
@@ -78,26 +86,21 @@ def _bw_coll():
 
 
 async def _bw_load(service_id, month):
-    """Load last-known bandwidth for this service+month."""
+    """Read stored running total for this service+month."""
     coll = _bw_coll()
     if coll is None:
         return None
     try:
-        doc = await coll.find_one({"_id": f"{service_id}:{month}"})
-        if doc:
-            return {
-                "gb":    float(doc.get("gb", 0)),
-                "email": doc.get("email"),
-                "plan":  doc.get("plan"),
-                "ts":    doc.get("updated_at"),
-            }
+        return await coll.find_one({"_id": f"{service_id}:{month}"})
     except Exception:
         logger.exception("[RENDER] bw_load failed")
-    return None
+        return None
 
 
-async def _bw_save(service_id, month, gb, email=None, plan=None):
-    """Save bandwidth snapshot to Mongo."""
+async def _bw_save(service_id, month, tx_bytes, rx_bytes,
+                   last_psutil_tx, last_psutil_rx,
+                   email=None, plan=None):
+    """Write updated running total to Mongo."""
     coll = _bw_coll()
     if coll is None:
         return
@@ -106,18 +109,86 @@ async def _bw_save(service_id, month, gb, email=None, plan=None):
             {"_id": f"{service_id}:{month}"},
             {
                 "$set": {
-                    "service_id": service_id,
-                    "month":      month,
-                    "gb":         float(gb),
-                    "email":      email,
-                    "plan":       plan,
-                    "updated_at": datetime.utcnow(),
+                    "service_id":     service_id,
+                    "month":          month,
+                    "tx_bytes":       int(tx_bytes),
+                    "rx_bytes":       int(rx_bytes),
+                    "last_psutil_tx": int(last_psutil_tx),
+                    "last_psutil_rx": int(last_psutil_rx),
+                    "email":          email,
+                    "plan":           plan,
+                    "updated_at":     datetime.utcnow(),
+                },
+                "$setOnInsert": {
+                    "created_at": datetime.utcnow(),
                 },
             },
             upsert=True,
         )
     except Exception:
         logger.exception("[RENDER] bw_save failed")
+
+
+async def get_persistent_tx_rx(service_id, email=None, plan=None):
+    """
+    Return accumulated {tx_bytes, rx_bytes} for this month.
+    Survives redeploys, resets every calendar month.
+    """
+    if not service_id:
+        return {"tx_bytes": 0, "rx_bytes": 0}
+
+    month_key = datetime.utcnow().strftime("%Y-%m")
+    now_ts = time.time()
+
+    # Current psutil readings (0 if unavailable)
+    cur_tx = 0
+    cur_rx = 0
+    if psutil:
+        try:
+            io = psutil.net_io_counters()
+            cur_tx = int(io.bytes_sent)
+            cur_rx = int(io.bytes_recv)
+        except Exception:
+            pass
+
+    # Load last stored state
+    stored = await _bw_load(service_id, month_key)
+
+    if stored is None:
+        stored_tx        = 0
+        stored_rx        = 0
+        stored_psutil_tx = cur_tx
+        stored_psutil_rx = cur_rx
+    else:
+        stored_tx        = int(stored.get("tx_bytes", 0) or 0)
+        stored_rx        = int(stored.get("rx_bytes", 0) or 0)
+        stored_psutil_tx = int(stored.get("last_psutil_tx", 0) or 0)
+        stored_psutil_rx = int(stored.get("last_psutil_rx", 0) or 0)
+
+    # Compute delta since last save
+    # If current psutil counter is LOWER than stored → container
+    # restarted (psutil resets). Then delta = current counter
+    # (the whole current session's traffic since boot).
+    delta_tx = cur_tx if cur_tx < stored_psutil_tx else cur_tx - stored_psutil_tx
+    delta_rx = cur_rx if cur_rx < stored_psutil_rx else cur_rx - stored_psutil_rx
+
+    new_tx = stored_tx + delta_tx
+    new_rx = stored_rx + delta_rx
+
+    # Throttled save
+    if now_ts - _BW_STATE["last_save_ts"] >= _BW_SAVE_INTERVAL:
+        await _bw_save(
+            service_id, month_key,
+            tx_bytes=new_tx,
+            rx_bytes=new_rx,
+            last_psutil_tx=cur_tx,
+            last_psutil_rx=cur_rx,
+            email=email,
+            plan=plan,
+        )
+        _BW_STATE["last_save_ts"] = now_ts
+
+    return {"tx_bytes": new_tx, "rx_bytes": new_rx}
 
 
 # ============================================================
@@ -135,6 +206,7 @@ _PLAN_LIMITS_GB = {
     "hobby": 5.0,
     "pro": 25.0,
     "scale": 1024.0,
+    "free": 100.0,
 }
 
 _keys     = _split_env("RENDER_API_KEYS")
@@ -157,7 +229,7 @@ if not _plans:
     _plans = [single_plan]
 
 # Normalize lengths
-_count = min(len(_keys), len(_services))
+_count    = min(len(_keys), len(_services))
 _keys     = _keys[:_count]
 _services = _services[:_count]
 
@@ -173,21 +245,21 @@ RENDER_ACCOUNTS = [
         "plan":       _plans[i].lower(),
         "limit_gb":   _PLAN_LIMITS_GB.get(_plans[i].lower(), 5.0),
         # runtime-filled
-        "account_name":    None,
-        "account_email":   None,
-        "workspace_name":  None,
-        "service_name":    None,
-        "service_region":  None,
-        "service_url":     None,
-        "service_type":    None,
+        "account_name":   None,
+        "account_email":  None,
+        "workspace_name": None,
+        "service_name":   None,
+        "service_region": None,
+        "service_url":    None,
+        "service_type":   None,
     }
     for i in range(_count)
 ]
 
-# Currently-active account (index into RENDER_ACCOUNTS)
+# Currently-active account
 _ACTIVE_ACCOUNT = {"index": 0}
 
-# Metadata cache — refresh only every 30 minutes
+# Metadata cache — refresh every 30 minutes
 _META_CACHE = {"ts": 0.0}
 
 
@@ -340,17 +412,8 @@ def usage_badge(pct):
 
 
 # ============================================================
-# PSUTIL COLLECTOR
+# CGROUP HELPERS (container-aware CPU / RAM)
 # ============================================================
-
-_NET_SAMPLE = {"ts": 0.0, "tx": 0, "rx": 0}
-
-if psutil:
-    try:
-        psutil.cpu_percent(interval=None)
-    except Exception:
-        pass
-
 
 def _read_cgroup_memory():
     try:
@@ -395,6 +458,19 @@ def _read_cgroup_cpu_quota():
     except Exception:
         pass
     return os.cpu_count() or 1
+
+
+# ============================================================
+# PSUTIL COLLECTOR
+# ============================================================
+
+_NET_SAMPLE = {"ts": 0.0, "tx": 0, "rx": 0}
+
+if psutil:
+    try:
+        psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
 
 
 def collect_system():
@@ -468,7 +544,7 @@ def collect_system():
 
 
 # ============================================================
-# RENDER API HELPERS
+# RENDER API HELPERS (only used for account/service metadata)
 # ============================================================
 
 def _render_headers(api_key):
@@ -502,25 +578,21 @@ async def _render_get_json(url, api_key, timeout=10):
                 url, headers=_render_headers(api_key)
             ) as resp:
                 if resp.status == 401:
-                    _LAST_API_ERROR["msg"] = "401 Unauthorized — API key invalid or revoked"
+                    _LAST_API_ERROR["msg"] = "401 Unauthorized"
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
-
                 if resp.status == 403:
-                    _LAST_API_ERROR["msg"] = "403 Forbidden — API key missing scope"
+                    _LAST_API_ERROR["msg"] = "403 Forbidden"
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
-
                 if resp.status == 404:
-                    _LAST_API_ERROR["msg"] = "404 Not Found — service ID wrong"
+                    _LAST_API_ERROR["msg"] = "404 Not Found"
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
-
                 if resp.status == 429:
-                    _LAST_API_ERROR["msg"] = "429 Rate limited — try again later"
+                    _LAST_API_ERROR["msg"] = "429 Rate limited"
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
-
                 if resp.status != 200:
                     body = ""
                     try:
@@ -532,11 +604,10 @@ async def _render_get_json(url, api_key, timeout=10):
                     )
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
-
                 return await resp.json()
 
     except asyncio.TimeoutError:
-        _LAST_API_ERROR["msg"] = f"Timeout after {timeout}s — network blocked"
+        _LAST_API_ERROR["msg"] = f"Timeout after {timeout}s"
         _LAST_API_ERROR["ts"] = time.time()
         return None
     except Exception as e:
@@ -553,7 +624,7 @@ async def fetch_account_metadata(account, force=False):
     now_ts = time.time()
     cache_age = now_ts - _META_CACHE["ts"]
 
-    if not force and cache_age < _BW_TTL and account.get("account_email"):
+    if not force and cache_age < 1800 and account.get("account_email"):
         return
 
     api_key = account["api_key"]
@@ -583,15 +654,15 @@ async def fetch_account_metadata(account, force=False):
         f"https://api.render.com/v1/services/{svc_id}", api_key
     )
     if isinstance(svc, dict):
-        account["service_name"]   = svc.get("name")
-        account["service_type"]   = svc.get("type")
+        account["service_name"] = svc.get("name")
+        account["service_type"] = svc.get("type")
         sd = svc.get("serviceDetails") or {}
         account["service_region"] = (
             sd.get("region")
             or svc.get("region")
             or account.get("service_region")
         )
-        account["service_url"]    = (
+        account["service_url"] = (
             sd.get("url")
             or svc.get("url")
             or account.get("service_url")
@@ -601,166 +672,20 @@ async def fetch_account_metadata(account, force=False):
 
 
 # ============================================================
-# BANDWIDTH FETCH (with persistence)
+# BANDWIDTH FETCH (psutil-based, persisted)
 # ============================================================
 
-async def _fetch_one_bandwidth(account):
-    """
-    Fetch bandwidth for a single account.
-    In-memory cache 30 min. Falls back to Mongo stored value
-    on API failure or lag.
-    """
-    if not account:
-        return None, False
-
-    api_key    = account["api_key"]
-    service_id = account["service_id"]
-
-    if not api_key or not service_id:
-        return None, False
-
-    # ── In-memory cache ──────────────────────────────────
-    cached = _BW_CACHE.get(service_id)
-    if cached and (time.time() - cached["ts"]) < _BW_TTL:
-        return cached["gb"], cached["ok"]
-
-    # Current month key
-    month_key = datetime.utcnow().strftime("%Y-%m")
-
-    now_utc = datetime.utcnow()
-    month_start = datetime(now_utc.year, now_utc.month, 1)
-
-    start_str = month_start.strftime("%Y-%m-%dT%H:%M:%SZ")
-    end_str   = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    url = (
-        "https://api.render.com/v1/metrics/bandwidth"
-        f"?startTime={start_str}"
-        f"&endTime={end_str}"
-        f"&resource={service_id}"
-    )
-
-    data = await _render_get_json(url, api_key, timeout=10)
-
-    if data is None:
-        # API failed → fall back to Mongo
-        stored = await _bw_load(service_id, month_key)
-        if stored is not None:
-            logger.info(
-                "[RENDER] API down — using stored %.3f GB for %s",
-                stored["gb"], service_id,
-            )
-            _BW_CACHE[service_id] = {
-                "gb": stored["gb"],
-                "ok": True,
-                "ts": time.time(),
-            }
-            return stored["gb"], True
-
-        _BW_CACHE[service_id] = {
-            "gb": 0.0,
-            "ok": False,
-            "ts": time.time(),
-        }
-        return None, False
-
-    # ── Parse response (multiple shapes supported) ───────
-    total_bytes = 0
-    try:
-        def _extract_value(pt):
-            """
-            Render returns values in several shapes.
-            Handle every known one without crashing.
-            """
-            if pt is None:
-                return 0
-            # [timestamp, value] pair — most common
-            if isinstance(pt, (list, tuple)):
-                if len(pt) >= 2:
-                    try:
-                        return int(pt[1])
-                    except Exception:
-                        return 0
-                return 0
-            # {"value": X} dict
-            if isinstance(pt, dict):
-                v = pt.get("value")
-                if v is None:
-                    return 0
-                try:
-                    return int(v)
-                except Exception:
-                    return 0
-            # raw number
-            if isinstance(pt, (int, float)):
-                return int(pt)
-            return 0
-
-        if isinstance(data, list):
-            for series in data:
-                if not isinstance(series, dict):
-                    # top-level might be a pair
-                    total_bytes += _extract_value(series)
-                    continue
-
-                values = series.get("values")
-                if isinstance(values, list):
-                    for pt in values:
-                        total_bytes += _extract_value(pt)
-                elif "value" in series:
-                    total_bytes += _extract_value(series)
-
-        elif isinstance(data, dict):
-            inner = data.get("data")
-            if isinstance(inner, list):
-                for series in inner:
-                    if isinstance(series, dict):
-                        values = series.get("values")
-                        if isinstance(values, list):
-                            for pt in values:
-                                total_bytes += _extract_value(pt)
-                        elif "value" in series:
-                            total_bytes += _extract_value(series)
-                    else:
-                        total_bytes += _extract_value(series)
-
-    except Exception:
-        return None, False
-
-    gb = total_bytes / (1024 ** 3)
-
-    # If API returned 0 but stored has bigger value → trust stored
-    stored = await _bw_load(service_id, month_key)
-    if stored is not None and gb < stored["gb"]:
-        logger.info(
-            "[RENDER] API returned %.3f GB but stored %.3f GB — using stored",
-            gb, stored["gb"],
-        )
-        gb = stored["gb"]
-
-    # Save to Mongo
-    await _bw_save(
-        service_id,
-        month_key,
-        gb,
-        email=account.get("account_email"),
-        plan=account.get("plan"),
-    )
-
-    _BW_CACHE[service_id] = {
-        "gb": gb,
-        "ok": True,
-        "ts": time.time(),
-    }
-    return gb, True
-
-
 async def fetch_bandwidth_multi():
-    """Try each configured account; use first that works."""
+    """
+    Get bandwidth usage for the currently-active account.
+    Uses psutil TX (bytes out) as the billable metric.
+    Persists to MongoDB for cross-restart continuity.
+    """
     if not RENDER_ACCOUNTS:
         return {
             "ok": False,
-            "gb": 0.0,
+            "tx_bytes": 0,
+            "rx_bytes": 0,
             "service_id": None,
             "plan": "hobby",
             "limit_gb": 5.0,
@@ -769,58 +694,35 @@ async def fetch_bandwidth_multi():
             "total_accounts": 0,
         }
 
-    cur = _ACTIVE_ACCOUNT["index"]
-    order = []
-    if 0 <= cur < len(RENDER_ACCOUNTS):
-        order.append(cur)
-    for i in range(len(RENDER_ACCOUNTS)):
-        if i != cur:
-            order.append(i)
+    idx = _ACTIVE_ACCOUNT["index"]
+    if not (0 <= idx < len(RENDER_ACCOUNTS)):
+        idx = 0
 
-    for idx in order:
-        acct = RENDER_ACCOUNTS[idx]
-        gb, ok = await _fetch_one_bandwidth(acct)
-        if not ok:
-            continue
+    acct = RENDER_ACCOUNTS[idx]
 
-        if gb is not None and gb > acct["limit_gb"]:
-            logger.info(
-                "[RENDER] account %s over limit (%.2f/%.2f GB) — trying next",
-                idx + 1, gb, acct["limit_gb"],
-            )
-            continue
+    # Fetch metadata once (email, service name)
+    try:
+        await fetch_account_metadata(acct)
+    except Exception:
+        pass
 
-        _ACTIVE_ACCOUNT["index"] = idx
+    counters = await get_persistent_tx_rx(
+        acct["service_id"],
+        email=acct.get("account_email"),
+        plan=acct.get("plan"),
+    )
 
-        try:
-            await fetch_account_metadata(acct)
-        except Exception:
-            pass
-
-        return {
-            "ok": True,
-            "gb": gb,
-            "service_id": acct["service_id"],
-            "plan": acct["plan"],
-            "limit_gb": acct["limit_gb"],
-            "account_index": idx,
-            "account": acct,
-            "total_accounts": len(RENDER_ACCOUNTS),
-        }
-
-    first = RENDER_ACCOUNTS[0]
     return {
-        "ok": False,
-        "gb": 0.0,
-        "service_id": first["service_id"],
-        "plan": first["plan"],
-        "limit_gb": first["limit_gb"],
-        "account_index": 0,
-        "account": first,
+        "ok":           True,
+        "tx_bytes":     counters["tx_bytes"],
+        "rx_bytes":     counters["rx_bytes"],
+        "service_id":   acct["service_id"],
+        "plan":         acct["plan"],
+        "limit_gb":     acct["limit_gb"],
+        "account_index": idx,
+        "account":      acct,
         "total_accounts": len(RENDER_ACCOUNTS),
     }
-
-
 # ============================================================
 # DASHBOARD BUILDER
 # ============================================================
@@ -831,8 +733,12 @@ async def build_render_page():
 
     acct = bw.get("account") or {}
 
+    # ── Bandwidth math (TX = outbound = billable) ────────
     limit_gb = bw["limit_gb"]
-    bw_gb    = bw["gb"] or 0.0
+    tx_bytes = bw.get("tx_bytes", 0) or 0
+    rx_bytes = bw.get("rx_bytes", 0) or 0
+
+    bw_gb    = tx_bytes / (1024 ** 3)
     bw_pct   = (bw_gb / limit_gb * 100) if limit_gb > 0 else 0
     bw_left  = max(0.0, limit_gb - bw_gb)
 
@@ -842,12 +748,13 @@ async def build_render_page():
     else:
         over_txt = "$0.00 (safe)"
 
-    acct_email = acct.get("account_email") or "—"
-    acct_name  = acct.get("account_name")  or "—"
+    # ── Account display strings ──────────────────────────
+    acct_email = acct.get("account_email")  or "—"
+    acct_name  = acct.get("account_name")   or "—"
     ws_name    = acct.get("workspace_name") or "—"
-    svc_name   = acct.get("service_name")  or "—"
+    svc_name   = acct.get("service_name")   or "—"
     svc_region = acct.get("service_region") or "—"
-    svc_type   = acct.get("service_type")  or "—"
+    svc_type   = acct.get("service_type")   or "—"
 
     total_accounts = bw.get("total_accounts", 0)
     acct_idx       = bw.get("account_index", 0)
@@ -863,6 +770,7 @@ async def build_render_page():
     disk_badge = usage_badge(sys["disk_pct"])
     bw_badge   = usage_badge(bw_pct)
 
+    # ── Header ───────────────────────────────────────────
     text = (
         "╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
         "   🛰️  <b>R E N D E R</b>\n"
@@ -874,12 +782,14 @@ async def build_render_page():
         f"⏱ Uptime <code>{fmt_duration(uptime)}</code>\n"
         f"\n"
 
+        # ── ACCOUNT ───────────────────────────────────────
         "╭─〔 👤 <b>ACCOUNT</b> 〕────────╮\n"
         f"│ 📧 <code>{html_escape(acct_email)}</code>\n"
         f"│ 🏷️ <b>{html_escape(acct_name)}</b>\n"
         f"│ 🏢 <code>{html_escape(ws_name)}</code>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── SERVICE ───────────────────────────────────────
         "╭─〔 🚀 <b>SERVICE</b> 〕────────╮\n"
         f"│ 📛 <b>{html_escape(svc_name)}</b>\n"
         f"│ 🆔 <code>{bw['service_id'] or '—'}</code>\n"
@@ -888,6 +798,7 @@ async def build_render_page():
         f"│ 📊 Plan <b>{bw['plan'].upper()}</b>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── BANDWIDTH ─────────────────────────────────────
         "╭─〔 🌐 <b>BANDWIDTH</b> 〕──────╮\n"
     )
 
@@ -897,7 +808,7 @@ async def build_render_page():
         has_srv = bool(_services and _services[0])
 
         text += (
-            "│ ⚠️ <b>API unreachable</b>\n"
+            "│ ⚠️ <b>Unavailable</b>\n"
             f"│ <code>{html_escape(err_msg)[:140]}</code>\n"
             "│\n"
             f"│ 🔑 Key set:  {'✅' if has_key else '❌'}\n"
@@ -905,9 +816,10 @@ async def build_render_page():
             f"│ 📊 Limit:    <b>{limit_gb:.2f} GB</b>\n"
         )
     else:
-        used_mb  = bw_gb * 1024
+        used_mb  = tx_bytes / (1024 * 1024)
         limit_mb = limit_gb * 1024
         left_mb  = max(0.0, limit_mb - used_mb)
+        rx_mb    = rx_bytes / (1024 * 1024)
 
         if used_mb < 1024:
             used_line  = f"{used_mb:.1f} MB"
@@ -925,6 +837,7 @@ async def build_render_page():
             f"│\n"
             f"│ {usage_bar(bw_pct, 12)} <b>{bw_pct:.2f}%</b>\n"
             f"│ <i>{used_mb:.1f} MB / {limit_mb:.0f} MB used</i>\n"
+            f"│ <i>RX: {rx_mb:.1f} MB (not billed)</i>\n"
             f"│\n"
             f"│ 💸 Overage: {over_txt}\n"
         )
@@ -932,31 +845,36 @@ async def build_render_page():
     text += (
         "╰───────────────────────╯\n\n"
 
+        # ── CPU ───────────────────────────────────────────
         "╭─〔 ⚙️ <b>CPU</b> 〕─────────────╮\n"
         f"│ {cpu_badge} Usage <b>{sys['cpu_pct']:.1f}%</b>\n"
         f"│ {usage_bar(sys['cpu_pct'], 12)} <b>{sys['cpu_pct']:.1f}%</b>\n"
         f"│ 🧩 Cores <code>{sys.get('cpu_count', 1)}</code>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── RAM ───────────────────────────────────────────
         "╭─〔 🧠 <b>RAM</b> 〕─────────────╮\n"
         f"│ {ram_badge} Used <b>{fmt_bytes(sys['ram_used'])}</b>\n"
         f"│ 📦 Total <code>{fmt_bytes(sys['ram_total'])}</code>\n"
         f"│ {usage_bar(sys['ram_pct'], 12)} <b>{sys['ram_pct']:.1f}%</b>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── DISK ──────────────────────────────────────────
         "╭─〔 💽 <b>DISK</b> 〕────────────╮\n"
         f"│ {disk_badge} Used <b>{fmt_bytes(sys['disk_used'])}</b>\n"
         f"│ 📦 Total <code>{fmt_bytes(sys['disk_total'])}</code>\n"
         f"│ {usage_bar(sys['disk_pct'], 12)} <b>{sys['disk_pct']:.1f}%</b>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── NETWORK ───────────────────────────────────────
         "╭─〔 🌊 <b>NETWORK</b> 〕─────────╮\n"
-        f"│ ⬆️ TX total <code>{fmt_bytes(sys['net_tx'])}</code>\n"
-        f"│ ⬇️ RX total <code>{fmt_bytes(sys['net_rx'])}</code>\n"
+        f"│ ⬆️ TX session <code>{fmt_bytes(sys['net_tx'])}</code>\n"
+        f"│ ⬇️ RX session <code>{fmt_bytes(sys['net_rx'])}</code>\n"
         f"│ ⚡ TX rate  <code>{fmt_bytes(sys['net_tx_rate'])}/s</code>\n"
         f"│ ⚡ RX rate  <code>{fmt_bytes(sys['net_rx_rate'])}/s</code>\n"
         "╰───────────────────────╯\n\n"
 
+        # ── HEALTH ────────────────────────────────────────
         "╭─〔 🛰️ <b>HEALTH</b> 〕──────────╮\n"
         f"│ {cpu_badge} CPU    {'OK' if sys['cpu_pct'] < 80 else 'HIGH'}\n"
         f"│ {ram_badge} RAM    {'OK' if sys['ram_pct'] < 80 else 'HIGH'}\n"
@@ -977,6 +895,12 @@ async def build_render_page():
             "CPU/RAM/Disk hidden</i>"
         )
 
+    if _main_db is None:
+        text += (
+            "\n\n⚠️ <i>MongoDB unavailable — "
+            "bandwidth will reset on redeploy</i>"
+        )
+
     return text[:4000]
 
 
@@ -985,8 +909,8 @@ async def build_render_page():
 # ============================================================
 
 _RENDER_PANEL_LOCK = asyncio.Lock()
-_RENDER_PANELS = {}
-_RENDER_LAST_TEXT = {"t": None}
+_RENDER_PANELS     = {}
+_RENDER_LAST_TEXT  = {"t": None}
 
 
 def _render_keyboard():
@@ -1002,7 +926,7 @@ def _render_keyboard():
             ),
         ],
         [
-            InlineKeyboardButton("❌ CLOSE",   callback_data="dtv_render_close"),
+            InlineKeyboardButton("❌ CLOSE", callback_data="dtv_render_close"),
         ],
     ])
 
@@ -1140,8 +1064,8 @@ def _open_panel(client, message):
     _stop_panel(message.id)
     task = asyncio.create_task(_render_loop(client, message))
     _RENDER_PANELS[int(message.id)] = {
-        "page": "render",
-        "task": task,
+        "page":   "render",
+        "task":   task,
         "closed": False,
     }
     return task
@@ -1195,11 +1119,14 @@ async def render_callback(client, query):
 
     if data == "dtv_render_refresh":
         await query.answer("🔄 Refreshing")
-        _BW_CACHE.clear()
         _META_CACHE["ts"] = 0.0
         _RENDER_LAST_TEXT["t"] = None
+
         text = await build_render_page()
-        ok, dead = await _edit_panel(query.message, text, _render_keyboard())
+        ok, dead = await _edit_panel(
+            query.message, text, _render_keyboard(),
+        )
+
         if dead:
             new_msg = await _recreate_panel(client, query.message.chat.id)
             if new_msg:
@@ -1235,8 +1162,17 @@ async def render_callback(client, query):
         return
 
 
+# ============================================================
+# STARTUP LOG
+# ============================================================
+
 logger.info(
     "[RENDER] dashboard loaded — /render (%d account(s), persist=%s)",
     len(RENDER_ACCOUNTS),
     "on" if _main_db is not None else "off",
 )
+
+
+# ============================================================
+# END OF FILE
+# ============================================================
