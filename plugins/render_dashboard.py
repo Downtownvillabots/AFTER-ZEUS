@@ -15,6 +15,8 @@
 # Multi-account: tries each configured pair in order, uses the
 # first one that responds. Remembers the working one.
 #
+# Bandwidth is persisted to MongoDB so it survives redeploys.
+#
 # ============================================================
 
 import os
@@ -37,12 +39,77 @@ from pyrogram.types import (
 )
 from pyrogram.errors import FloodWait, RPCError
 
+
 # ============================================================
 # BANDWIDTH CACHE — refresh once every 30 minutes
 # ============================================================
 
 _BW_CACHE = {}   # {service_id: {"gb": float, "ok": bool, "ts": float}}
 _BW_TTL   = 1800  # 30 minutes in seconds
+
+
+# ============================================================
+# PERSISTENT BANDWIDTH STORAGE (survives redeploys)
+# ============================================================
+
+try:
+    from database.ia_filterdb import db as _main_db
+except Exception:
+    _main_db = None
+
+_BW_PERSIST_COLLECTION = "Telegram_files_render_bw"
+
+
+def _bw_coll():
+    if not _main_db:
+        return None
+    try:
+        return _main_db[_BW_PERSIST_COLLECTION]
+    except Exception:
+        return None
+
+
+async def _bw_load(service_id, month):
+    """Load last-known bandwidth for this service+month."""
+    coll = _bw_coll()
+    if coll is None:
+        return None
+    try:
+        doc = await coll.find_one({"_id": f"{service_id}:{month}"})
+        if doc:
+            return {
+                "gb":    float(doc.get("gb", 0)),
+                "email": doc.get("email"),
+                "plan":  doc.get("plan"),
+                "ts":    doc.get("updated_at"),
+            }
+    except Exception:
+        logger.exception("[RENDER] bw_load failed")
+    return None
+
+
+async def _bw_save(service_id, month, gb, email=None, plan=None):
+    """Save bandwidth snapshot to Mongo."""
+    coll = _bw_coll()
+    if coll is None:
+        return
+    try:
+        await coll.update_one(
+            {"_id": f"{service_id}:{month}"},
+            {
+                "$set": {
+                    "service_id": service_id,
+                    "month":      month,
+                    "gb":         float(gb),
+                    "email":      email,
+                    "plan":       plan,
+                    "updated_at": datetime.utcnow(),
+                },
+            },
+            upsert=True,
+        )
+    except Exception:
+        logger.exception("[RENDER] bw_save failed")
 
 
 # ============================================================
@@ -120,7 +187,7 @@ RENDER_ACCOUNTS = [
 # Currently-active account (index into RENDER_ACCOUNTS)
 _ACTIVE_ACCOUNT = {"index": 0}
 
-# Metadata cache — refresh only every 5 minutes
+# Metadata cache — refresh only every 30 minutes
 _META_CACHE = {"ts": 0.0}
 
 
@@ -249,15 +316,15 @@ def usage_bar(pct, length=12):
     filled = int(length * pct / 100)
 
     if pct >= 90:
-        fill = "🟥"     # critical
+        fill = "🟥"
     elif pct >= 60:
-        fill = "🟧"     # warning
+        fill = "🟧"
     elif pct >= 30:
-        fill = "🟨"     # watch
+        fill = "🟨"
     else:
-        fill = "🟩"     # safe
+        fill = "🟩"
 
-    empty = "⬜"
+    empty = "⬛"
     return fill * filled + empty * (length - filled)
 
 
@@ -273,7 +340,7 @@ def usage_badge(pct):
 
 
 # ============================================================
-# PSUTIL COLLECTOR — real-time CPU / RAM / Disk / Net
+# PSUTIL COLLECTOR
 # ============================================================
 
 _NET_SAMPLE = {"ts": 0.0, "tx": 0, "rx": 0}
@@ -283,6 +350,51 @@ if psutil:
         psutil.cpu_percent(interval=None)
     except Exception:
         pass
+
+
+def _read_cgroup_memory():
+    try:
+        with open("/sys/fs/cgroup/memory.max") as f:
+            raw = f.read().strip()
+            if raw != "max":
+                return int(raw)
+    except Exception:
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
+            val = int(f.read().strip())
+            if val < (1 << 60):
+                return val
+    except Exception:
+        pass
+    return 0
+
+
+def _read_cgroup_memory_used():
+    try:
+        with open("/sys/fs/cgroup/memory.current") as f:
+            return int(f.read().strip())
+    except Exception:
+        pass
+    try:
+        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f:
+            return int(f.read().strip())
+    except Exception:
+        pass
+    return 0
+
+
+def _read_cgroup_cpu_quota():
+    try:
+        with open("/sys/fs/cgroup/cpu.max") as f:
+            parts = f.read().strip().split()
+            if len(parts) == 2 and parts[0] != "max":
+                quota = int(parts[0])
+                period = int(parts[1])
+                return max(1, round(quota / period))
+    except Exception:
+        pass
+    return os.cpu_count() or 1
 
 
 def collect_system():
@@ -298,6 +410,7 @@ def collect_system():
         "net_rx":      0,
         "net_tx_rate": 0.0,
         "net_rx_rate": 0.0,
+        "cpu_count":   1,
     }
 
     if not psutil:
@@ -309,8 +422,7 @@ def collect_system():
         pass
 
     out["cpu_count"] = _read_cgroup_cpu_quota()
-    
-    # Use cgroup limits for containers, fall back to psutil
+
     cg_total = _read_cgroup_memory()
     cg_used  = _read_cgroup_memory_used()
 
@@ -355,61 +467,6 @@ def collect_system():
     return out
 
 
-def _read_cgroup_memory():
-    """Read memory limit from cgroup (container-aware)."""
-    try:
-        # cgroup v2
-        with open("/sys/fs/cgroup/memory.max") as f:
-            raw = f.read().strip()
-            if raw != "max":
-                return int(raw)
-    except Exception:
-        pass
-
-    try:
-        # cgroup v1
-        with open("/sys/fs/cgroup/memory/memory.limit_in_bytes") as f:
-            val = int(f.read().strip())
-            # ignore absurdly high values (no limit set)
-            if val < (1 << 60):
-                return val
-    except Exception:
-        pass
-
-    return 0
-
-
-def _read_cgroup_memory_used():
-    """Read current memory usage from cgroup."""
-    try:
-        with open("/sys/fs/cgroup/memory.current") as f:
-            return int(f.read().strip())
-    except Exception:
-        pass
-
-    try:
-        with open("/sys/fs/cgroup/memory/memory.usage_in_bytes") as f:
-            return int(f.read().strip())
-    except Exception:
-        pass
-
-    return 0
-
-
-def _read_cgroup_cpu_quota():
-    """Return effective CPU count from cgroup v2."""
-    try:
-        with open("/sys/fs/cgroup/cpu.max") as f:
-            parts = f.read().strip().split()
-            if len(parts) == 2 and parts[0] != "max":
-                quota = int(parts[0])
-                period = int(parts[1])
-                return max(1, round(quota / period))
-    except Exception:
-        pass
-    return os.cpu_count() or 1
-
-
 # ============================================================
 # RENDER API HELPERS
 # ============================================================
@@ -421,13 +478,10 @@ def _render_headers(api_key):
     }
 
 
-# Diagnostic state — last API error per account
 _LAST_API_ERROR = {"msg": None, "ts": 0.0}
 
 
 async def _render_get_json(url, api_key, timeout=10):
-    """Fetch JSON from Render, caching the last error message."""
-    # sanity checks
     if not api_key:
         _LAST_API_ERROR["msg"] = "API key is empty"
         _LAST_API_ERROR["ts"] = time.time()
@@ -462,6 +516,11 @@ async def _render_get_json(url, api_key, timeout=10):
                     _LAST_API_ERROR["ts"] = time.time()
                     return None
 
+                if resp.status == 429:
+                    _LAST_API_ERROR["msg"] = "429 Rate limited — try again later"
+                    _LAST_API_ERROR["ts"] = time.time()
+                    return None
+
                 if resp.status != 200:
                     body = ""
                     try:
@@ -489,14 +548,8 @@ async def _render_get_json(url, api_key, timeout=10):
 # ============================================================
 # ACCOUNT METADATA FETCH
 # ============================================================
-#
-# Pulls the account email (via /v1/users), workspace name
-# (via /v1/owners), and service name/region (via /v1/services).
-# Cached for 5 minutes so we don't hammer the API.
-# ============================================================
 
 async def fetch_account_metadata(account, force=False):
-    """Fill account metadata fields. Safe to call repeatedly."""
     now_ts = time.time()
     cache_age = now_ts - _META_CACHE["ts"]
 
@@ -506,21 +559,17 @@ async def fetch_account_metadata(account, force=False):
     api_key = account["api_key"]
     svc_id  = account["service_id"]
 
-    # 1. Who am I — returns the authenticated user
     who = await _render_get_json(
         "https://api.render.com/v1/users", api_key
     )
     if isinstance(who, dict):
-        # Response shape: {"id":..., "email":..., "name":...}
         account["account_email"] = who.get("email") or account.get("account_email")
         account["account_name"]  = who.get("name")  or account.get("account_name")
 
-    # 2. List owners/workspaces
     owners = await _render_get_json(
         "https://api.render.com/v1/owners?limit=20", api_key
     )
     if isinstance(owners, list) and owners:
-        # Take the first workspace (usually the default one)
         entry = owners[0]
         if isinstance(entry, dict):
             ws = entry.get("owner") or entry
@@ -530,7 +579,6 @@ async def fetch_account_metadata(account, force=False):
                 or account.get("workspace_name")
             )
 
-    # 3. Service details (name, region, type, url)
     svc = await _render_get_json(
         f"https://api.render.com/v1/services/{svc_id}", api_key
     )
@@ -553,12 +601,15 @@ async def fetch_account_metadata(account, force=False):
 
 
 # ============================================================
-# BANDWIDTH — MULTI-ACCOUNT
+# BANDWIDTH FETCH (with persistence)
 # ============================================================
 
 async def _fetch_one_bandwidth(account):
-    """Fetch bandwidth for a single account.
-    Cached for 30 minutes. Returns (gb, ok)."""
+    """
+    Fetch bandwidth for a single account.
+    In-memory cache 30 min. Falls back to Mongo stored value
+    on API failure or lag.
+    """
     if not account:
         return None, False
 
@@ -568,15 +619,17 @@ async def _fetch_one_bandwidth(account):
     if not api_key or not service_id:
         return None, False
 
-    # ── 30-minute cache check ────────────────────────────
+    # ── In-memory cache ──────────────────────────────────
     cached = _BW_CACHE.get(service_id)
     if cached and (time.time() - cached["ts"]) < _BW_TTL:
         return cached["gb"], cached["ok"]
 
+    # Current month key
+    month_key = datetime.utcnow().strftime("%Y-%m")
+
     now_utc = datetime.utcnow()
     month_start = datetime(now_utc.year, now_utc.month, 1)
 
-    # Render wants ISO 8601 (RFC 3339), not Unix epoch
     start_str = month_start.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str   = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -586,8 +639,24 @@ async def _fetch_one_bandwidth(account):
         f"&endTime={end_str}"
         f"&resource={service_id}"
     )
+
     data = await _render_get_json(url, api_key, timeout=10)
+
     if data is None:
+        # API failed → fall back to Mongo
+        stored = await _bw_load(service_id, month_key)
+        if stored is not None:
+            logger.info(
+                "[RENDER] API down — using stored %.3f GB for %s",
+                stored["gb"], service_id,
+            )
+            _BW_CACHE[service_id] = {
+                "gb": stored["gb"],
+                "ok": True,
+                "ts": time.time(),
+            }
+            return stored["gb"], True
+
         _BW_CACHE[service_id] = {
             "gb": 0.0,
             "ok": False,
@@ -627,6 +696,25 @@ async def _fetch_one_bandwidth(account):
         return None, False
 
     gb = total_bytes / (1024 ** 3)
+
+    # If API returned 0 but stored has bigger value → trust stored
+    stored = await _bw_load(service_id, month_key)
+    if stored is not None and gb < stored["gb"]:
+        logger.info(
+            "[RENDER] API returned %.3f GB but stored %.3f GB — using stored",
+            gb, stored["gb"],
+        )
+        gb = stored["gb"]
+
+    # Save to Mongo
+    await _bw_save(
+        service_id,
+        month_key,
+        gb,
+        email=account.get("account_email"),
+        plan=account.get("plan"),
+    )
+
     _BW_CACHE[service_id] = {
         "gb": gb,
         "ok": True,
@@ -634,12 +722,9 @@ async def _fetch_one_bandwidth(account):
     }
     return gb, True
 
+
 async def fetch_bandwidth_multi():
-    """
-    Try each configured account in order. Use the first that works.
-    Auto-skips accounts that are over their plan limit.
-    Returns a dict with everything the panel needs.
-    """
+    """Try each configured account; use first that works."""
     if not RENDER_ACCOUNTS:
         return {
             "ok": False,
@@ -666,17 +751,15 @@ async def fetch_bandwidth_multi():
         if not ok:
             continue
 
-        # Skip accounts over their plan limit
         if gb is not None and gb > acct["limit_gb"]:
             logger.info(
-                "[RENDER] account %s is over limit (%.2f/%.2f GB) — trying next",
+                "[RENDER] account %s over limit (%.2f/%.2f GB) — trying next",
                 idx + 1, gb, acct["limit_gb"],
             )
             continue
 
         _ACTIVE_ACCOUNT["index"] = idx
 
-        # Fill metadata (cached for 5 min)
         try:
             await fetch_account_metadata(acct)
         except Exception:
@@ -693,7 +776,6 @@ async def fetch_bandwidth_multi():
             "total_accounts": len(RENDER_ACCOUNTS),
         }
 
-    # All accounts failed
     first = RENDER_ACCOUNTS[0]
     return {
         "ok": False,
@@ -717,16 +799,8 @@ async def build_render_page():
 
     acct = bw.get("account") or {}
 
-    # ── Bandwidth math ───────────────────────────────────
     limit_gb = bw["limit_gb"]
-    # Use psutil TX as the real bandwidth counter
-    # (matches what Render bills — outbound from container)
-    session_tx_bytes = sys["net_tx"]
-    session_tx_gb = session_tx_bytes / (1024 ** 3)
-
-    # If API returned more, use that. Otherwise use session TX.
-    api_gb = bw["gb"] or 0.0
-    bw_gb  = max(api_gb, session_tx_gb)
+    bw_gb    = bw["gb"] or 0.0
     bw_pct   = (bw_gb / limit_gb * 100) if limit_gb > 0 else 0
     bw_left  = max(0.0, limit_gb - bw_gb)
 
@@ -736,7 +810,6 @@ async def build_render_page():
     else:
         over_txt = "$0.00 (safe)"
 
-    # ── Account display strings ──────────────────────────
     acct_email = acct.get("account_email") or "—"
     acct_name  = acct.get("account_name")  or "—"
     ws_name    = acct.get("workspace_name") or "—"
@@ -753,14 +826,11 @@ async def build_render_page():
 
     uptime = time.time() - PROCESS_START_TS
 
-    sep = "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄"
-
     cpu_badge  = usage_badge(sys["cpu_pct"])
     ram_badge  = usage_badge(sys["ram_pct"])
     disk_badge = usage_badge(sys["disk_pct"])
     bw_badge   = usage_badge(bw_pct)
 
-    # ── Header ───────────────────────────────────────────
     text = (
         "╭━━━━━━━━━━━━━━━━━━━━━━━╮\n"
         "   🛰️  <b>R E N D E R</b>\n"
@@ -772,14 +842,12 @@ async def build_render_page():
         f"⏱ Uptime <code>{fmt_duration(uptime)}</code>\n"
         f"\n"
 
-        # ── ACCOUNT IDENTITY ──────────────────────────────
         "╭─〔 👤 <b>ACCOUNT</b> 〕────────╮\n"
         f"│ 📧 <code>{html_escape(acct_email)}</code>\n"
         f"│ 🏷️ <b>{html_escape(acct_name)}</b>\n"
         f"│ 🏢 <code>{html_escape(ws_name)}</code>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── SERVICE ───────────────────────────────────────
         "╭─〔 🚀 <b>SERVICE</b> 〕────────╮\n"
         f"│ 📛 <b>{html_escape(svc_name)}</b>\n"
         f"│ 🆔 <code>{bw['service_id'] or '—'}</code>\n"
@@ -788,14 +856,11 @@ async def build_render_page():
         f"│ 📊 Plan <b>{bw['plan'].upper()}</b>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── BANDWIDTH ─────────────────────────────────────
         "╭─〔 🌐 <b>BANDWIDTH</b> 〕──────╮\n"
     )
 
     if not bw["ok"]:
         err_msg = _LAST_API_ERROR.get("msg") or "unknown error"
-
-        # Which env vars are actually set?
         has_key = bool(_keys and _keys[0])
         has_srv = bool(_services and _services[0])
 
@@ -812,7 +877,6 @@ async def build_render_page():
         limit_mb = limit_gb * 1024
         left_mb  = max(0.0, limit_mb - used_mb)
 
-        # Show MB when usage is small (< 1 GB), GB when large
         if used_mb < 1024:
             used_line  = f"{used_mb:.1f} MB"
             limit_line = f"{limit_mb:.0f} MB"
@@ -836,28 +900,24 @@ async def build_render_page():
     text += (
         "╰───────────────────────╯\n\n"
 
-        # ── CPU ───────────────────────────────────────────
         "╭─〔 ⚙️ <b>CPU</b> 〕─────────────╮\n"
         f"│ {cpu_badge} Usage <b>{sys['cpu_pct']:.1f}%</b>\n"
         f"│ {usage_bar(sys['cpu_pct'], 12)} <b>{sys['cpu_pct']:.1f}%</b>\n"
-        f"│ 🧩 Cores <code>{sys.get('cpu_count', os.cpu_count() or 1)}</code>\n"
+        f"│ 🧩 Cores <code>{sys.get('cpu_count', 1)}</code>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── RAM ───────────────────────────────────────────
         "╭─〔 🧠 <b>RAM</b> 〕─────────────╮\n"
         f"│ {ram_badge} Used <b>{fmt_bytes(sys['ram_used'])}</b>\n"
         f"│ 📦 Total <code>{fmt_bytes(sys['ram_total'])}</code>\n"
         f"│ {usage_bar(sys['ram_pct'], 12)} <b>{sys['ram_pct']:.1f}%</b>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── DISK ──────────────────────────────────────────
         "╭─〔 💽 <b>DISK</b> 〕────────────╮\n"
         f"│ {disk_badge} Used <b>{fmt_bytes(sys['disk_used'])}</b>\n"
         f"│ 📦 Total <code>{fmt_bytes(sys['disk_total'])}</code>\n"
         f"│ {usage_bar(sys['disk_pct'], 12)} <b>{sys['disk_pct']:.1f}%</b>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── NETWORK ───────────────────────────────────────
         "╭─〔 🌊 <b>NETWORK</b> 〕─────────╮\n"
         f"│ ⬆️ TX total <code>{fmt_bytes(sys['net_tx'])}</code>\n"
         f"│ ⬇️ RX total <code>{fmt_bytes(sys['net_rx'])}</code>\n"
@@ -865,7 +925,6 @@ async def build_render_page():
         f"│ ⚡ RX rate  <code>{fmt_bytes(sys['net_rx_rate'])}/s</code>\n"
         "╰───────────────────────╯\n\n"
 
-        # ── HEALTH ────────────────────────────────────────
         "╭─〔 🛰️ <b>HEALTH</b> 〕──────────╮\n"
         f"│ {cpu_badge} CPU    {'OK' if sys['cpu_pct'] < 80 else 'HIGH'}\n"
         f"│ {ram_badge} RAM    {'OK' if sys['ram_pct'] < 80 else 'HIGH'}\n"
@@ -903,6 +962,12 @@ def _render_keyboard():
         [
             InlineKeyboardButton("🔄 REFRESH", callback_data="dtv_render_refresh"),
             InlineKeyboardButton("🔀 SWITCH",  callback_data="dtv_render_switch"),
+        ],
+        [
+            InlineKeyboardButton(
+                "📊 BILLING PAGE",
+                url="https://dashboard.render.com/billing",
+            ),
         ],
         [
             InlineKeyboardButton("❌ CLOSE",   callback_data="dtv_render_close"),
@@ -1098,6 +1163,9 @@ async def render_callback(client, query):
 
     if data == "dtv_render_refresh":
         await query.answer("🔄 Refreshing")
+        _BW_CACHE.clear()
+        _META_CACHE["ts"] = 0.0
+        _RENDER_LAST_TEXT["t"] = None
         text = await build_render_page()
         ok, dead = await _edit_panel(query.message, text, _render_keyboard())
         if dead:
@@ -1115,18 +1183,14 @@ async def render_callback(client, query):
             )
             return
 
-        # Manually advance to the next account
         cur = _ACTIVE_ACCOUNT["index"]
         nxt = (cur + 1) % len(RENDER_ACCOUNTS)
         _ACTIVE_ACCOUNT["index"] = nxt
 
-        # Force metadata refresh on next panel build
         _META_CACHE["ts"] = 0.0
         _RENDER_LAST_TEXT["t"] = None
 
-        await query.answer(
-            f"🔀 Switched to account #{nxt + 1}",
-        )
+        await query.answer(f"🔀 Switched to account #{nxt + 1}")
 
         text = await build_render_page()
         await _edit_panel(query.message, text, _render_keyboard())
@@ -1140,6 +1204,7 @@ async def render_callback(client, query):
 
 
 logger.info(
-    "[RENDER] dashboard loaded — /render (%d account(s))",
+    "[RENDER] dashboard loaded — /render (%d account(s), persist=%s)",
     len(RENDER_ACCOUNTS),
+    "on" if _main_db else "off",
 )
