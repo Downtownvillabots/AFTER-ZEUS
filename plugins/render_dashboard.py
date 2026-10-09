@@ -61,7 +61,7 @@ _BW_PERSIST_COLLECTION = "Telegram_files_render_bw"
 
 
 def _bw_coll():
-    if not _main_db:
+    if _main_db is None:
         return None
     try:
         return _main_db[_BW_PERSIST_COLLECTION]
@@ -1206,5 +1206,5 @@ async def render_callback(client, query):
 logger.info(
     "[RENDER] dashboard loaded — /render (%d account(s), persist=%s)",
     len(RENDER_ACCOUNTS),
-    "on" if _main_db else "off",
+    "on" if _main_db is not None else "off",
 )
