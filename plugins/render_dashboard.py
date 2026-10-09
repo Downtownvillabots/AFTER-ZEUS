@@ -41,6 +41,14 @@ from pyrogram.errors import FloodWait, RPCError
 
 
 # ============================================================
+# LOGGER
+# ============================================================
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+# ============================================================
 # BANDWIDTH CACHE — refresh once every 30 minutes
 # ============================================================
 
@@ -110,14 +118,6 @@ async def _bw_save(service_id, month, gb, email=None, plan=None):
         )
     except Exception:
         logger.exception("[RENDER] bw_save failed")
-
-
-# ============================================================
-# LOGGER
-# ============================================================
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
 
 
 # ============================================================
@@ -664,34 +664,66 @@ async def _fetch_one_bandwidth(account):
         }
         return None, False
 
+    # ── Parse response (multiple shapes supported) ───────
     total_bytes = 0
     try:
+        def _extract_value(pt):
+            """
+            Render returns values in several shapes.
+            Handle every known one without crashing.
+            """
+            if pt is None:
+                return 0
+            # [timestamp, value] pair — most common
+            if isinstance(pt, (list, tuple)):
+                if len(pt) >= 2:
+                    try:
+                        return int(pt[1])
+                    except Exception:
+                        return 0
+                return 0
+            # {"value": X} dict
+            if isinstance(pt, dict):
+                v = pt.get("value")
+                if v is None:
+                    return 0
+                try:
+                    return int(v)
+                except Exception:
+                    return 0
+            # raw number
+            if isinstance(pt, (int, float)):
+                return int(pt)
+            return 0
+
         if isinstance(data, list):
             for series in data:
                 if not isinstance(series, dict):
+                    # top-level might be a pair
+                    total_bytes += _extract_value(series)
                     continue
+
                 values = series.get("values")
                 if isinstance(values, list):
                     for pt in values:
-                        if isinstance(pt, dict):
-                            try:
-                                total_bytes += int(pt.get("value", 0) or 0)
-                            except Exception:
-                                pass
+                        total_bytes += _extract_value(pt)
                 elif "value" in series:
-                    try:
-                        total_bytes += int(series.get("value", 0) or 0)
-                    except Exception:
-                        pass
+                    total_bytes += _extract_value(series)
+
         elif isinstance(data, dict):
             inner = data.get("data")
             if isinstance(inner, list):
-                for pt in inner:
-                    if isinstance(pt, dict):
-                        try:
-                            total_bytes += int(pt.get("value", 0) or 0)
-                        except Exception:
-                            pass
+                for series in inner:
+                    if isinstance(series, dict):
+                        values = series.get("values")
+                        if isinstance(values, list):
+                            for pt in values:
+                                total_bytes += _extract_value(pt)
+                        elif "value" in series:
+                            total_bytes += _extract_value(series)
+                    else:
+                        total_bytes += _extract_value(series)
+
     except Exception:
         return None, False
 
